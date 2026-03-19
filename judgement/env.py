@@ -140,8 +140,8 @@ class JudgementEnv(Env):
         Normalized to roughly [-1, 1] based on score range.
         """
         scores = np.array([p.score for p in self.game.players])
-        # Normalize: theoretical max per round is ~23 (10+13), 25 rounds → ~575
-        max_possible = 25 * 23
+        # Normalize: theoretical max per round is ~23 (10+13), 13 rounds → ~299
+        max_possible = 13 * 23
         payoffs = scores / max_possible
         return payoffs
 

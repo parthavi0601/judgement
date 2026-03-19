@@ -21,9 +21,9 @@ class JudgementGame:
         self.num_players = num_players
         self.np_random = np.random.RandomState()
 
-        # Sub-round schedule: 1→2→...→max_cards→(max_cards-1)→...→1
+        # Sub-round schedule: 13→12→...→1
         max_cards = 52 // num_players  # 13 for 4 players
-        self._round_schedule = list(range(1, max_cards + 1)) + list(range(max_cards - 1, 0, -1))
+        self._round_schedule = list(range(max_cards, 0, -1))
 
         # State
         self.players: List[JudgementPlayer] = []
@@ -57,6 +57,7 @@ class JudgementGame:
             num_cards=num_cards,
             dealer_player_id=self.dealer_index,
             np_random=self.np_random,
+            round_index=self.round_index,
         )
 
     def step(self, action):

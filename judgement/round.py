@@ -13,20 +13,26 @@ from .judger import JudgementJudger
 class JudgementRound:
     """A single sub-round: deal, bid, play tricks."""
 
+    # Fixed trump rotation order: Spades → Diamonds → Clubs → Hearts
+    TRUMP_ORDER = ['S', 'D', 'C', 'H']
+
     def __init__(self, players: List[JudgementPlayer], num_cards: int,
-                 dealer_player_id: int, np_random):
+                 dealer_player_id: int, np_random, round_index: int = 0):
         self.players = players
         self.num_players = len(players)
         self.num_cards = num_cards
         self.dealer_player_id = dealer_player_id
         self.np_random = np_random
+        self.round_index = round_index
 
         # Deal cards and reveal trump
         self.dealer = JudgementDealer(np_random)
         self.dealer.new_round(players, num_cards)
-        self.trump_suit: Optional[str] = (
-            self.dealer.trump_card.suit if self.dealer.trump_card else None
-        )
+
+        # Trump suit: use fixed rotation order (S→D→C→H)
+        # The revealed trump card (first undealt card) is kept for display,
+        # but the suit follows the fixed rotation.
+        self.trump_suit: Optional[str] = self.TRUMP_ORDER[round_index % len(self.TRUMP_ORDER)]
 
         # Phase tracking
         self.is_bidding: bool = True

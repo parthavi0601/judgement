@@ -131,14 +131,13 @@ class TestJudgementGame:
         assert 'legal_actions' in state
 
     def test_round_schedule(self):
-        """Card counts follow 1→13→12→...→1 pattern."""
+        """Card counts follow 13→12→...→1 pattern."""
         game = JudgementGame(num_players=4)
         schedule = game._round_schedule
-        assert schedule[0] == 1
-        assert schedule[12] == 13
-        assert schedule[13] == 12
+        assert schedule[0] == 13
+        assert schedule[1] == 12
         assert schedule[-1] == 1
-        assert len(schedule) == 25
+        assert len(schedule) == 13
 
     def test_full_game_plays_to_completion(self):
         """A full game with random actions completes without error."""

@@ -22,6 +22,10 @@ from judgement.card import JudgementCard
 from judgement.judger import JudgementJudger
 from judgement.round import JudgementRound
 
+from rlcard.envs.registration import make as rlcard_make
+from agents.hybrid_agent import HybridMCNFSPAgent
+from main import load_nfsp_agents, register_judgement_env
+
 # ── Pretty-printing helpers ──────────────────────────────────────────────
 
 SUIT_SYMBOLS = {'S': '♠', 'H': '♥', 'D': '♦', 'C': '♣'}
@@ -46,9 +50,33 @@ def print_divider():
 
 # ── Main game loop ──────────────────────────────────────────────────────
 
-def play_game(max_rounds=None):
-    game = JudgementGame(allow_step_back=False, num_players=4)
-    game.np_random = np.random.RandomState(42)
+def play_game(args=None):
+    max_rounds = args.rounds if args else None
+
+    register_judgement_env()
+    env = rlcard_make('judgement', config={
+        'seed': args.seed if args and hasattr(args, 'seed') else 42,
+        'allow_step_back': False,
+        'game_num_players': 4,
+    })
+    game = env.game
+
+    nfsp_agents = None
+    if args and getattr(args, 'load_checkpoint', None) is not None:
+        nfsp_agents = load_nfsp_agents(env, getattr(args, 'save_dir', './checkpoints'), args.load_checkpoint)
+
+    bot_agents = [None] * 4
+    if args and (getattr(args, 'load_checkpoint', None) is not None or getattr(args, 'use_mcts', False)):
+        print('\n  Initializing Hybrid MCNFSP Agents for bots...')
+        for pid in range(1, 4):
+            agent = HybridMCNFSPAgent(
+                env=env,
+                agent_player_id=pid,
+                nfsp_agent=nfsp_agents[pid] if nfsp_agents else None,
+                num_simulations=getattr(args, 'mcts_simulations', 50),
+                max_depth=getattr(args, 'mcts_depth', 2)
+            )
+            bot_agents[pid] = agent
 
     state, current_pid = game.init_game()
 
@@ -61,8 +89,9 @@ def play_game(max_rounds=None):
     print('═' * 60)
     print(f'  You are Player {human_id}.')
     print(f'  Trump order rotates: Spades → Diamonds → Clubs → Hearts')
+    schedule_str = "→".join(str(c) for c in game._round_schedule)
     print(f'  Total sub-rounds: {total_rounds}')
-    print(f'  Card schedule: 13→12→...→1')
+    print(f'  Card schedule: {schedule_str}')
     if max_rounds:
         print(f'  (Playing only first {max_rounds} sub-rounds)')
     print('═' * 60)
@@ -156,7 +185,13 @@ def play_game(max_rounds=None):
 
         else:
             # ── Bot turn ──
-            action = np.random.choice(list(legal_actions))
+            agent = bot_agents[current_pid]
+            if agent is not None:
+                extracted_state = env._extract_state(game.get_state(current_pid))
+                action_id, _ = agent.eval_step(extracted_state)
+                action = int(action_id)
+            else:
+                action = int(np.random.choice(list(legal_actions)))
 
             if rnd.is_bidding:
                 bid_val = action
@@ -208,8 +243,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Play Judgement interactively')
     parser.add_argument('--rounds', type=int, default=None,
                         help='Number of sub-rounds to play (default: all 25)')
+    parser.add_argument('--load-checkpoint', type=int, default=None, metavar='EPISODE',
+                        help='Load pre-trained NFSP from checkpoints at this episode number')
+    parser.add_argument('--save-dir', type=str, default='./checkpoints',
+                        help='Directory to load model checkpoints from')
+    parser.add_argument('--mcts-depth', type=int, default=2,
+                        help='MCTS max depth for bots')
+    parser.add_argument('--mcts-simulations', type=int, default=50,
+                        help='MCTS simulations per decision for bots')
+    parser.add_argument('--use-mcts', action='store_true',
+                        help='Use heuristic MCTS for bots even if no checkpoint is loaded')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    
     args = parser.parse_args()
     try:
-        play_game(max_rounds=args.rounds)
+        play_game(args=args)
     except KeyboardInterrupt:
         print('\n\n  Game cancelled. Goodbye!')

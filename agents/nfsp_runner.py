@@ -4,6 +4,7 @@ Uses rlcard.agents.nfsp_agent.NFSPAgent with the custom JudgementEnv.
 """
 
 import os
+import csv
 import torch
 import numpy as np
 
@@ -15,9 +16,9 @@ from rlcard.utils import reorganize
 def create_nfsp_agents(env, hidden_layers=None, device=None):
     """Create NFSP agents for all players."""
     if hidden_layers is None:
-        hidden_layers = [128, 128]
+        hidden_layers = [256, 128, 128, 64]
     if device is None:
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     agents = []
     for _ in range(env.num_players):
@@ -45,11 +46,32 @@ def create_nfsp_agents(env, hidden_layers=None, device=None):
             evaluate_with='average_policy',
             device=device,
         )
+        
+        # --- Monkey patch to track latest losses for logging ---
+        agent.latest_sl_loss = 0.0
+        agent.latest_rl_loss = 0.0
+        
+        original_train_sl = agent.train_sl
+        def tracked_train_sl(*args, orig_fn=original_train_sl, agent_ref=agent, **kwargs):
+            sl_loss = orig_fn(*args, **kwargs)
+            if sl_loss is not None:
+                agent_ref.latest_sl_loss = sl_loss
+            return sl_loss
+        agent.train_sl = tracked_train_sl
+        
+        original_update = agent._rl_agent.q_estimator.update
+        def tracked_update(*args, orig_fn=original_update, agent_ref=agent, **kwargs):
+            rl_loss = orig_fn(*args, **kwargs)
+            agent_ref.latest_rl_loss = rl_loss
+            return rl_loss
+        agent._rl_agent.q_estimator.update = tracked_update
+        # -------------------------------------------------------
+
         agents.append(agent)
     return agents
 
 
-def train_nfsp(env, num_episodes=10000, evaluate_every=500, save_dir=None, verbose=True):
+def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=None, save_dir=None, verbose=True):
     """
     Train NFSP agents on the Judgement environment.
     
@@ -57,18 +79,30 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, save_dir=None, verbo
         env: JudgementEnv instance
         num_episodes: Total training episodes
         evaluate_every: Evaluate performance every N episodes
+        checkpoint_every: Save checkpoints every N episodes
         save_dir: Directory to save checkpoints
         verbose: Print progress
     
     Returns:
         agents: Trained NFSP agents
     """
+    if checkpoint_every is None:
+        checkpoint_every = evaluate_every * 4
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     agents = create_nfsp_agents(env, device=device)
     env.set_agents(agents)
 
     if save_dir and not os.path.exists(save_dir):
         os.makedirs(save_dir)
+
+    csv_path = os.path.join(save_dir, 'training_metrics.csv') if save_dir else None
+    if csv_path:
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            header = ['episode']
+            for pid in range(env.num_players):
+                header.extend([f'player_{pid}_avg_payoff', f'player_{pid}_rl_loss', f'player_{pid}_sl_loss'])
+            writer.writerow(header)
 
     rewards_log = []
 
@@ -96,11 +130,19 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, save_dir=None, verbo
         if verbose and episode % evaluate_every == 0:
             avg_payoffs = np.mean(rewards_log[-evaluate_every:], axis=0)
             print(f'\n\nEpisode {episode}/{num_episodes}')
+            
+            csv_row = [episode]
             for pid in range(env.num_players):
-                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f}')
+                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f} | RL loss = {agents[pid].latest_rl_loss:.4f} | SL loss = {agents[pid].latest_sl_loss:.4f}')
+                csv_row.extend([avg_payoffs[pid], agents[pid].latest_rl_loss, agents[pid].latest_sl_loss])
+            
+            if csv_path is not None:
+                with open(csv_path, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(csv_row)
 
         # Save checkpoint
-        if save_dir and episode % (evaluate_every * 4) == 0:
+        if save_dir and episode % checkpoint_every == 0:
             for pid, agent in enumerate(agents):
                 agent.save_checkpoint(save_dir, filename=f'nfsp_agent_{pid}_ep{episode}.pt')
             if verbose:

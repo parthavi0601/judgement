@@ -24,15 +24,19 @@ def register_judgement_env():
         pass  # Already registered
 
 
-def run_nfsp_training(env, num_episodes, save_dir):
+def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoint_every=None):
     """Phase 1: Train NFSP agents."""
     from agents.nfsp_runner import train_nfsp
+
+    eval_freq = evaluate_every if evaluate_every else max(1, num_episodes // 10)
+    ckpt_freq = checkpoint_every if checkpoint_every else eval_freq * 4
 
     print(f'\n=== Phase 1: NFSP Training ({num_episodes} episodes) ===')
     agents = train_nfsp(
         env,
         num_episodes=num_episodes,
-        evaluate_every=max(1, num_episodes // 10),
+        evaluate_every=eval_freq,
+        checkpoint_every=ckpt_freq,
         save_dir=save_dir,
         verbose=True,
     )
@@ -125,6 +129,10 @@ def main():
                         help='MCTS simulations per decision')
     parser.add_argument('--eval-games', type=int, default=20,
                         help='Pure NFSP evaluation games (Phase 3, for comparison)')
+    parser.add_argument('--evaluate-every', type=int, default=None,
+                        help='Evaluate every N episodes')
+    parser.add_argument('--checkpoint-every', type=int, default=None,
+                        help='Save checkpoint every N episodes')
     parser.add_argument('--save-dir', type=str, default='./checkpoints',
                         help='Directory to save/load model checkpoints')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -147,7 +155,7 @@ def main():
     if args.load_checkpoint is not None:
         nfsp_agents = load_nfsp_agents(env, args.save_dir, args.load_checkpoint)
     else:
-        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir)
+        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every)
 
     # Phase 2: Hybrid MC-NFSP evaluation
     hybrid_avg = run_hybrid_evaluation(

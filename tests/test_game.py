@@ -1,137 +1,184 @@
-import pytest
+"""Tests for Judgement game logic."""
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import numpy as np
 from judgement.game import JudgementGame
-from judgement.env import JudgementEnv
+from judgement.judger import JudgementJudger
 from judgement.card import JudgementCard
+from judgement.player import JudgementPlayer
 
-def test_game_initialization():
-    """Thoroughly check game initialization state."""
-    game = JudgementGame(starting_set_cards=13)
-    game.init_game()
-    
-    assert len(game.players) == 4
-    assert game.current_player_id == (game.dealer_id + 1) % 4
-    assert game.round_number == 1
-    assert game.num_cards == 13
-    assert len(game.played_cards_history) == 0
-    
-    for player in game.players:
-        assert len(player.hand) == 13
 
-def test_bidding_phase_legality():
-    """Verify bidding constraints, especially the dealer's forbidden bid."""
-    game = JudgementGame(starting_set_cards=3)
-    game.init_game()
-    
-    # Player 1, 2, 3 bid
-    game.step(1) # p1 bids 1
-    game.step(1) # p2 bids 1
-    game.step(0) # p3 bids 0
-    
-    # Total so far: 1+1+0 = 2. Cards in play: 3.
-    # Dealer (p0) cannot bid 1 because 2+1 = 3.
-    legal_actions = game.get_legal_actions(0)
-    assert 1 not in legal_actions
-    assert 0 in legal_actions
-    assert 2 in legal_actions
-    assert 3 in legal_actions
+class TestJudgementJudger:
 
-def test_trick_resolution_and_history():
-    """Verify trick winners, suit following, and history tracking."""
-    # Force a simple game with 2 cards
-    game = JudgementGame(starting_set_cards=2)
-    game.init_game()
-    
-    # Bidding
-    for _ in range(4):
-        actions = game.get_legal_actions(game.current_player_id)
-        game.step(actions[0])
-    
-    assert game.phase == 'playing'
-    
-    # Simulate first trick
-    leader_id = game.current_player_id
-    cards_played = []
-    for _ in range(4):
-        player_id = game.current_player_id
-        action_ids = game.get_legal_actions(player_id)
-        legal_cards = [JudgementCard.make_from_index(a - 14) for a in action_ids]
-        
-        # Check suit following if not leader
-        if len(cards_played) > 0:
-            lead_suit = cards_played[0].suit
-            has_suit = any(c.suit == lead_suit for c in game.players[player_id].hand)
-            if has_suit:
-                for c in legal_cards:
-                    assert c.suit == lead_suit
-        
-        card = legal_cards[0]
-        cards_played.append(card)
-        game.step(card)
-        
-    # Check history after 1 trick
-    assert len(game.played_cards_history) == 1
-    last_trick = game.played_cards_history[0]
-    assert 'winner_id' in last_trick
-    assert len(last_trick['cards']) == 4
-    for _, c in last_trick['cards']: # current_trick is list of (player_id, JudgementCard)
-        # Note: cards_played might not be directly comparable with the tuple in the trick
-        # but we know cards_played contains the objects
-        pass
+    def test_trick_winner_lead_suit(self):
+        """Highest card of lead suit wins when no trump."""
+        cards = [
+            (0, JudgementCard('S', '5')),
+            (1, JudgementCard('S', 'K')),
+            (2, JudgementCard('S', '3')),
+            (3, JudgementCard('H', 'A')),  # off-suit, doesn't win
+        ]
+        winner = JudgementJudger.judge_trick(cards, trump_suit=None)
+        assert winner == 1  # King of Spades
 
-def test_observation_history_features():
-    """Verify the 227-feature observation correctly encodes history."""
-    env = JudgementEnv(config={'starting_set_cards': 1})
-    state, _ = env.reset()
-    obs = state['obs']
-    
-    # Initially history bits should be 0
-    # Trick winners: indices 123-174 (52 bits)
-    # Played cards: indices 175-226 (52 bits)
-    assert np.all(obs[123:175] == 0)
-    assert np.all(obs[175:227] == 0)
-    
-    # Play a full round (1 card each)
-    # Bidding
-    for _ in range(4):
-        action = list(state['legal_actions'].keys())[0]
-        state, _ = env.step(action)
-    
-    # Playing
-    played_cards = []
-    for _ in range(4):
-        action = list(state['legal_actions'].keys())[0]
-        played_cards.append(action - 14) # Convert action to card index
-        state, _ = env.step(action)
-    
-    # End of round/game (since 1 card)
-    # Get final state by getting internal state from game for observer 0
-    state = env.game.get_state(0)
-    obs = env._extract_state(state)['obs']
-    
-    # Now check history bits
-    # Trick 0 winner bit should be set in Trick winners section
-    winners_section = obs[123:175]
-    assert np.sum(winners_section) == 1
-    
-    # Played cards bitmask should have 4 bits set
-    mask_section = obs[175:227]
-    assert np.sum(mask_section) == 4
-    for c in played_cards:
-        assert mask_section[c] == 1
+    def test_trick_winner_trump(self):
+        """Trump card beats lead suit."""
+        cards = [
+            (0, JudgementCard('S', 'A')),  # lead: Ace of Spades
+            (1, JudgementCard('H', '2')),  # trump: 2 of Hearts
+            (2, JudgementCard('S', 'K')),
+            (3, JudgementCard('D', 'Q')),
+        ]
+        winner = JudgementJudger.judge_trick(cards, trump_suit='H')
+        assert winner == 1  # Even 2 of trumps beats Ace of lead
 
-def test_full_game_flow():
-    """Run a full game multi-round sequence and verify stability."""
-    game = JudgementGame(starting_set_cards=5)
-    # This will run 3 -> 2 -> 1 rounds
-    game.init_game()
-    
-    while not game.is_over():
-        action_ids = game.get_legal_actions(game.current_player_id)
-        action = action_ids[0]
-        if game.phase == 'playing':
-            action = JudgementCard.make_from_index(action - 14)
-        game.step(action)
-    
-    assert game.round_number == 16 # 5+4+3+2+1 completed rounds = 15, round_number increments after each
-    assert game.is_over()
+    def test_trick_winner_highest_trump(self):
+        """Multiple trumps: highest trump wins."""
+        cards = [
+            (0, JudgementCard('S', 'A')),
+            (1, JudgementCard('H', '5')),  # trump
+            (2, JudgementCard('H', 'K')),  # trump, higher
+            (3, JudgementCard('S', 'Q')),
+        ]
+        winner = JudgementJudger.judge_trick(cards, trump_suit='H')
+        assert winner == 2  # King of Hearts beats 5 of Hearts
+
+    def test_hook_rule(self):
+        """Dealer cannot make total bids == num_cards."""
+        players = [JudgementPlayer(i) for i in range(4)]
+        players[0].bid = 1
+        players[1].bid = 1
+        players[2].bid = 1
+        # num_cards=5, other bids sum=3, forbidden=5-3=2
+
+        legal = JudgementJudger.get_legal_bid_actions(
+            players[3], players, num_cards=5, is_dealer=True
+        )
+        assert 2 not in legal  # forbidden
+        assert 0 in legal
+        assert 1 in legal
+        assert 3 in legal
+
+    def test_no_hook_for_non_dealer(self):
+        """Non-dealer has no bid restriction."""
+        players = [JudgementPlayer(i) for i in range(4)]
+        legal = JudgementJudger.get_legal_bid_actions(
+            players[0], players, num_cards=5, is_dealer=False
+        )
+        assert len(legal) == 6  # 0,1,2,3,4,5
+
+    def test_follow_suit(self):
+        """Must follow lead suit if possible."""
+        player = JudgementPlayer(0)
+        player.hand = [
+            JudgementCard('S', 'A'),
+            JudgementCard('S', '5'),
+            JudgementCard('H', 'K'),
+        ]
+        actions = JudgementJudger.get_legal_play_actions(player, lead_suit='S')
+        # Only spades should be legal
+        card_ids = [a - JudgementJudger.NUM_BID_ACTIONS for a in actions]
+        for cid in card_ids:
+            assert cid // 13 == 0  # suit_index 0 is Spades
+
+    def test_any_card_when_void(self):
+        """If void in lead suit, any card is legal."""
+        player = JudgementPlayer(0)
+        player.hand = [
+            JudgementCard('H', 'A'),
+            JudgementCard('D', '5'),
+        ]
+        actions = JudgementJudger.get_legal_play_actions(player, lead_suit='S')
+        assert len(actions) == 2  # both cards
+
+    def test_scoring_exact_bid(self):
+        """Exact bid: +10 + tricks_won."""
+        players = [JudgementPlayer(0)]
+        players[0].bid = 3
+        players[0].tricks_won = 3
+        scores = JudgementJudger.compute_round_scores(players)
+        assert scores[0] == 13.0  # 10 + 3
+
+    def test_scoring_miss_bid(self):
+        """Missed bid: -|bid - tricks_won|."""
+        players = [JudgementPlayer(0)]
+        players[0].bid = 3
+        players[0].tricks_won = 1
+        scores = JudgementJudger.compute_round_scores(players)
+        assert scores[0] == -2.0  # -|3-1|
+
+    def test_scoring_zero_bid_exact(self):
+        """Bid 0, take 0: +10."""
+        players = [JudgementPlayer(0)]
+        players[0].bid = 0
+        players[0].tricks_won = 0
+        scores = JudgementJudger.compute_round_scores(players)
+        assert scores[0] == 10.0  # 10 + 0
+
+
+class TestJudgementGame:
+
+    def test_init_game(self):
+        """Game initializes without error."""
+        game = JudgementGame(num_players=4)
+        game.np_random = np.random.RandomState(42)
+        state, pid = game.init_game()
+        assert 0 <= pid < 4
+        assert 'hand' in state
+        assert 'legal_actions' in state
+
+    def test_round_schedule(self):
+        """Card counts follow 1→13→12→...→1 pattern."""
+        game = JudgementGame(num_players=4)
+        schedule = game._round_schedule
+        assert schedule[0] == 1
+        assert schedule[12] == 13
+        assert schedule[13] == 12
+        assert schedule[-1] == 1
+        assert len(schedule) == 25
+
+    def test_full_game_plays_to_completion(self):
+        """A full game with random actions completes without error."""
+        game = JudgementGame(num_players=4)
+        game.np_random = np.random.RandomState(42)
+        state, pid = game.init_game()
+
+        max_steps = 50000  # safety limit
+        steps = 0
+        while not game.is_over() and steps < max_steps:
+            legal = state['legal_actions']
+            if not legal:
+                break
+            action = np.random.choice(legal)
+            state, pid = game.step(action)
+            steps += 1
+
+        assert game.is_over(), f"Game didn't finish after {steps} steps"
+
+    def test_bidding_phase_transitions(self):
+        """After all 4 bids, round transitions to playing phase."""
+        game = JudgementGame(num_players=4)
+        game.np_random = np.random.RandomState(42)
+        state, pid = game.init_game()
+
+        # First round has 1 card, so bids should be 0 or 1
+        assert state['is_bidding'] is True
+
+        # Make 4 bids
+        for _ in range(4):
+            legal = state['legal_actions']
+            action = legal[0]
+            state, pid = game.step(action)
+
+        # Should be in playing phase now
+        assert state['is_bidding'] is False
+
+    def test_num_actions(self):
+        assert JudgementGame.get_num_actions() == 66
+
+    def test_num_players(self):
+        game = JudgementGame(num_players=4)
+        assert game.get_num_players() == 4

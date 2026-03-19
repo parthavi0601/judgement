@@ -1,16 +1,11 @@
 [project]
-name = "rlcard-judgement"
+name = "rlcard-judgement-main"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "pip>=26.0.1",
+    "pytest>=9.0.2",
     "rlcard>=1.2.0",
     "torch>=2.10.0",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0.2",
 ]

@@ -1,37 +1,37 @@
+"""
+Card representation for Judgement (Oh Hell) card game.
+52-card standard deck. card_id = suit_index * 13 + rank_index.
+"""
+
+
 class JudgementCard:
-    """Each and every card in the game is represented as an instance of this class.
-    """
-    SUITS=['S','D','H','C']
-    RANKS=['2','3','4','5','6','7','8','9','10','J','Q','K','A']
+    """A single playing card."""
 
+    suits = ['S', 'H', 'D', 'C']  # Spades, Hearts, Diamonds, Clubs
+    ranks = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']
 
-    def __init__(self,suit,rank):
-        """Iniitialize card with given suit and rank"""
-        self.suit=suit
-        self.rank=rank
+    def __init__(self, suit: str, rank: str):
+        self.suit = suit
+        self.rank = rank
+        self.suit_index = JudgementCard.suits.index(suit)
+        self.rank_index = JudgementCard.ranks.index(rank)
+        self.card_id = self.suit_index * 13 + self.rank_index
 
-    def get_index(self)->int:
-        """Unique Integer Value Associated with each card"""
-        return self.SUITS.index(self.suit)* 13 + self.RANKS.index(self.rank)
-    
-    def get_rank(self)->int:
-        return self.RANKS.index(self.rank)
-    
-    @classmethod
-    def make_from_index(cls,index:int)-> "JudgementCard":
-        """Creates a card from its index value"""
-        return cls(cls.SUITS[index//13],cls.RANKS[index%13])
-    
-    def __str__(self)->str:
-        return f"Card({self.suit}, {self.rank})"
-    
-    def __repr__(self)->str:
-        return f"JudgementCard({self.suit}, {self.rank})"
-    
-    def __eq__(self,other)->bool:
-        if isinstance(other,JudgementCard):
-            return self.suit==other.suit and self.rank==other.rank
+    @staticmethod
+    def get_deck():
+        """Return a full 52-card deck."""
+        return [JudgementCard(s, r) for s in JudgementCard.suits for r in JudgementCard.ranks]
+
+    def __str__(self):
+        return f'{self.rank}{self.suit}'
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __eq__(self, other):
+        if isinstance(other, JudgementCard):
+            return self.card_id == other.card_id
         return False
-    
-    def __hash__(self)->int:
-        return self.get_index()
+
+    def __hash__(self):
+        return hash(self.card_id)

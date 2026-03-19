@@ -1,40 +1,35 @@
-from typing import List
+"""
+Dealer for Judgement (Oh Hell) card game.
+Handles shuffling, dealing, and trump card reveal.
+"""
+
+from typing import List, Optional
 from .card import JudgementCard
 from .player import JudgementPlayer
-import secrets
+
 
 class JudgementDealer:
-    """In charge of deck creation,shuffling, dealing and tracking which suit is trump"""
+    """Deals cards and reveals trump."""
 
-    TRUMP_ORDER = ['S','D','C','H']
+    def __init__(self, np_random):
+        self.np_random = np_random
+        self.deck: List[JudgementCard] = []
+        self.trump_card: Optional[JudgementCard] = None
 
-    def __init__(self):
-        self.rng=secrets.SystemRandom()
-        self.deck:List[JudgementCard]=[]
-        # True Random shuffling and deck initialization
+    def new_round(self, players: List[JudgementPlayer], num_cards: int):
+        """Shuffle deck, deal num_cards to each player, reveal trump from remainder."""
+        self.deck = JudgementCard.get_deck()
+        self.np_random.shuffle(self.deck)
 
-    def create_deck(self):
-        """Make a completely new deck"""
-        self.deck=[]
-        for suit in JudgementCard.SUITS:
-            for rank in JudgementCard.RANKS:
-                self.deck.append(JudgementCard(suit,rank))
-
-    def shuffle(self):
-        """Shuffle deck in place"""
-        self.rng.shuffle(self.deck)
-
-    def deal_cards(self,player:JudgementPlayer,num_cards:int):
-        """Give player specified number of cards"""
-        for _ in range(num_cards):
-            if self.deck:
+        # Deal cards
+        for player in players:
+            player.reset_for_round()
+            for _ in range(num_cards):
                 player.hand.append(self.deck.pop())
 
-    @classmethod
-    def get_trump(cls,round_number:int)->str:
-        """
-        Get trump suit for given round number
-        Order is as follows
-        Spade, Diamonds, Clubs, Hearts
-        """
-        return cls.TRUMP_ORDER[(round_number-1)%4]
+        # Reveal trump card from remaining deck (if any cards remain)
+        if self.deck:
+            self.trump_card = self.deck[0]
+        else:
+            # When all 52 cards are dealt (13 cards × 4 players), no trump
+            self.trump_card = None

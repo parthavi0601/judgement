@@ -24,7 +24,7 @@ def register_judgement_env():
         pass  # Already registered
 
 
-def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoint_every=None):
+def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoint_every=None, agents=None, start_episode=0, rl_lr=0.01, sl_lr=0.005):
     """Phase 1: Train NFSP agents."""
     from agents.nfsp_runner import train_nfsp
 
@@ -39,6 +39,10 @@ def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoi
         checkpoint_every=ckpt_freq,
         save_dir=save_dir,
         verbose=True,
+        agents=agents,
+        start_episode=start_episode,
+        rl_learning_rate=rl_lr,
+        sl_learning_rate=sl_lr,
     )
     print('\nNFSP training complete.\n')
     return agents
@@ -94,12 +98,15 @@ def run_pure_nfsp_evaluation(env, nfsp_agents, num_games):
     return avg
 
 
-def load_nfsp_agents(env, checkpoint_dir, episode_tag):
+def load_nfsp_agents(env, checkpoint_dir, episode_tag, new_rl_lr=None, new_sl_lr=None):
     """Load pre-trained NFSP agents from checkpoints."""
     import torch
     from rlcard.agents.nfsp_agent import NFSPAgent
+    from agents.nfsp_runner import patch_agent_losses
 
     print(f'\n=== Loading NFSP agents from {checkpoint_dir} (episode {episode_tag}) ===')
+    if new_rl_lr or new_sl_lr:
+        print(f'  Updating learning rates -> RL: {new_rl_lr}, SL: {new_sl_lr}')
     agents = []
     for pid in range(env.num_players):
         filename = f'nfsp_agent_{pid}_ep{episode_tag}.pt'
@@ -108,6 +115,18 @@ def load_nfsp_agents(env, checkpoint_dir, episode_tag):
             raise FileNotFoundError(f'Checkpoint not found: {filepath}')
         checkpoint = torch.load(filepath, map_location='cpu', weights_only=False)
         agent = NFSPAgent.from_checkpoint(checkpoint)
+        
+        if new_sl_lr is not None:
+            agent._sl_learning_rate = new_sl_lr
+            for param_group in agent.policy_network_optimizer.param_groups:
+                param_group['lr'] = new_sl_lr
+
+        if new_rl_lr is not None:
+            agent._rl_agent.q_estimator.learning_rate = new_rl_lr
+            for param_group in agent._rl_agent.q_estimator.optimizer.param_groups:
+                param_group['lr'] = new_rl_lr
+
+        patch_agent_losses(agent)
         agents.append(agent)
         print(f'  Loaded Player {pid} from {filename}')
     print('  All agents loaded.\n')
@@ -117,10 +136,16 @@ def load_nfsp_agents(env, checkpoint_dir, episode_tag):
 def main():
     parser = argparse.ArgumentParser(description='Judgement Card Game — Hybrid MC-NFSP Pipeline')
     parser.add_argument('--nfsp-episodes', type=int, default=500,
-                        help='NFSP training episodes (Phase 1, skipped if --load-checkpoint)')
+                        help='NFSP training episodes (Phase 1, skipped if --load-checkpoint without --resume-training)')
+    parser.add_argument('--resume-training', action='store_true',
+                        help='Resume training from the loaded checkpoint instead of skipping training')
+    parser.add_argument('--rl-learning-rate', type=float, default=None,
+                        help='Override RL learning rate (Q-network) when resuming training')
+    parser.add_argument('--sl-learning-rate', type=float, default=None,
+                        help='Override SL learning rate (Average Policy) when resuming training')
     parser.add_argument('--load-checkpoint', type=int, default=None, metavar='EPISODE',
                         help='Load pre-trained NFSP from checkpoints at this episode number '
-                             '(e.g. --load-checkpoint 4000). Skips training.')
+                             '(e.g. --load-checkpoint 4000). Skips training unless --resume-training is specified.')
     parser.add_argument('--hybrid-games', type=int, default=10,
                         help='Hybrid MC-NFSP evaluation games (Phase 2)')
     parser.add_argument('--mcts-depth', type=int, default=2,
@@ -153,9 +178,19 @@ def main():
 
     # Phase 1: Train or Load NFSP agents
     if args.load_checkpoint is not None:
-        nfsp_agents = load_nfsp_agents(env, args.save_dir, args.load_checkpoint)
+        nfsp_agents = load_nfsp_agents(
+            env, 
+            args.save_dir, 
+            args.load_checkpoint,
+            new_rl_lr=args.rl_learning_rate,
+            new_sl_lr=args.sl_learning_rate
+        )
+        if args.resume_training:
+            nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, agents=nfsp_agents, start_episode=args.load_checkpoint)
     else:
-        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every)
+        rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.01
+        sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005
+        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, rl_lr=rl_lr, sl_lr=sl_lr)
 
     # Phase 2: Hybrid MC-NFSP evaluation
     hybrid_avg = run_hybrid_evaluation(

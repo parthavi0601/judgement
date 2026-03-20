@@ -21,9 +21,9 @@ class JudgementGame:
         self.num_players = num_players
         self.np_random = np.random.RandomState()
 
-        # Sub-round schedule: 13→12→...→1
+        # Sub-round schedule: just one round of max_cards
         max_cards = 52 // num_players  # 13 for 4 players
-        self._round_schedule = list(range(max_cards, 0, -1))
+        self._round_schedule = [max_cards]
 
         # State
         self.players: List[JudgementPlayer] = []

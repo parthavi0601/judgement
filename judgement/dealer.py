@@ -2,7 +2,7 @@
 Dealer for Judgement (Oh Hell) card game.
 Handles shuffling, dealing, and trump card reveal.
 """
-
+import numpy as np
 from typing import List, Optional
 from .card import JudgementCard
 from .player import JudgementPlayer
@@ -12,7 +12,7 @@ class JudgementDealer:
     """Deals cards and reveals trump."""
 
     def __init__(self, np_random):
-        self.np_random = np_random
+        self.np_random = np.random.default_rng()
         self.deck: List[JudgementCard] = []
         self.trump_card: Optional[JudgementCard] = None
 

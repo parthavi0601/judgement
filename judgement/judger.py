@@ -128,9 +128,9 @@ class JudgementJudger:
         scores = []
         for p in players:
             if p.bid is not None and p.bid == p.tricks_won:
-                scores.append(10.0 + p.tricks_won)
+                scores.append(1.0)
             elif p.bid is not None:
-                scores.append(-abs(p.bid - p.tricks_won))
+                scores.append(-1.0)
             else:
                 scores.append(0.0)
         return scores
@@ -140,7 +140,43 @@ class JudgementJudger:
         """
         Dense per-trick reward based on alignment with bid.
         Call AFTER updating tricks_won.
+
+        Only exact bid match scores in Judgement, so exceeding
+        is just as bad as falling short.
         """
+        if player.bid is None:
+            return 0.0
+
+        remaining_needed = player.bid - player.tricks_won
+        # After this trick, remaining_needed reflects the gap
+
+        if won_trick:
+            if remaining_needed >= 0:
+                # Won and still need more or exactly met — on track
+                return 0.5
+            else:
+                # Won but exceeded bid
+                return -1.0
+        else:
+            if remaining_needed == 0:
+                # Lost and exactly at bid — good, avoiding excess
+                return 0.5
+            elif remaining_needed > 0:
+                # Lost but still need tricks — bad
+                return -0.5
+            else:
+                # Lost and already exceeded — damage is done
+                return -0.3
+"""
+   @staticmethod
+    def compute_dense_trick_reward(player: JudgementPlayer, won_trick: bool) -> float:
+        "#""
+        Dense per-trick reward based on alignment with bid.
+        Call AFTER updating tricks_won.
+
+        Only exact bid match scores in Judgement, so exceeding
+        is just as bad as falling short.
+        "#""
         if player.bid is None:
             return 0.0
 
@@ -152,12 +188,17 @@ class JudgementJudger:
                 # Won and still need more or exactly met — on track
                 return 1.0
             else:
-                # Won but already exceeded bid
+                # Won but exceeded bid
                 return -0.5
         else:
-            if remaining_needed <= 0:
-                # Lost and already met/exceeded bid — good to lose
+            if remaining_needed == 0:
+                # Lost and exactly at bid — good, avoiding excess
                 return 0.5
-            else:
+            elif remaining_needed > 0:
                 # Lost but still need tricks — bad
                 return -0.3
+            else:
+                # Lost and already exceeded — damage is done
+                return 0
+
+"""

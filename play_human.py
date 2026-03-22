@@ -63,7 +63,7 @@ def play_game(args=None):
 
     nfsp_agents = None
     if args and getattr(args, 'load_checkpoint', None) is not None:
-        nfsp_agents = load_nfsp_agents(env, getattr(args, 'save_dir', './checkpoints'), args.load_checkpoint)
+        nfsp_agents = load_nfsp_agents(env, getattr(args, 'save_dir', './checkpoints2'), args.load_checkpoint)
 
     bot_agents = [None] * 4
     if args and (getattr(args, 'load_checkpoint', None) is not None or getattr(args, 'use_mcts', False)):

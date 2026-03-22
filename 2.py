@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-df = pd.read_csv('checkpoints2/training_metrics.csv')
+df = pd.read_csv('checkpointspls4/training_metrics.csv')
 
 def analyze_trends(df, x_col):
     """

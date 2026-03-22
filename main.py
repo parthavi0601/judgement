@@ -71,19 +71,36 @@ def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulati
     env.set_agents(hybrid_agents)
 
     total_payoffs = [0.0] * env.num_players
+    counts = [{'won': 0, 'under': 0, 'over': 0} for _ in range(env.num_players)]
     for game_idx in range(1, num_games + 1):
         trajectories, payoffs = env.run(is_training=False)
         for pid in range(env.num_players):
             total_payoffs[pid] += payoffs[pid]
+            p = env.game.players[pid]
+            if p.bid is not None:
+                if p.tricks_won == p.bid:
+                    counts[pid]['won'] += 1
+                elif p.tricks_won < p.bid:
+                    counts[pid]['under'] += 1
+                else:
+                    counts[pid]['over'] += 1
 
         if game_idx % max(1, num_games // 5) == 0:
             avg = [t / game_idx for t in total_payoffs]
             print(f'  Game {game_idx}/{num_games} — avg payoffs: {[f"{a:.4f}" for a in avg]}')
 
-    final_avg = [t / num_games for t in total_payoffs]
-    print(f'\n  Final avg payoffs: {[f"{a:.4f}" for a in final_avg]}')
+    if num_games > 0:
+        final_avg = [t / num_games for t in total_payoffs]
+        pcts = [{'won': c['won']/num_games*100, 'under': c['under']/num_games*100, 'over': c['over']/num_games*100} for c in counts]
+        print(f'\n  Final avg payoffs: {[f"{a:.4f}" for a in final_avg]}')
+        for pid in range(env.num_players):
+            print(f'  Player {pid}: Won {pcts[pid]["won"]:.1f}% Under {pcts[pid]["under"]:.1f}% Over {pcts[pid]["over"]:.1f}%')
+    else:
+        final_avg = [0.0] * env.num_players
+        pcts = [{'won': 0.0, 'under': 0.0, 'over': 0.0} for _ in range(env.num_players)]
+        print('\n  Skipped (0 games requested).')
     print('  Hybrid evaluation complete.\n')
-    return final_avg
+    return final_avg, pcts
 
 
 def run_pure_nfsp_evaluation(env, nfsp_agents, num_games):
@@ -92,10 +109,13 @@ def run_pure_nfsp_evaluation(env, nfsp_agents, num_games):
 
     print(f'=== Phase 3: Pure NFSP Evaluation ({num_games} games, for comparison) ===')
     env.set_agents(nfsp_agents)
-    avg = evaluate_agents(env, nfsp_agents, num_episodes=num_games)
+    avg, pcts = evaluate_agents(env, nfsp_agents, num_episodes=num_games)
     print(f'  Pure NFSP avg payoffs: {[f"{a:.4f}" for a in avg]}')
+    if num_games > 0:
+        for pid in range(env.num_players):
+            print(f'  Player {pid}: Won {pcts[pid]["won"]:.1f}% Under {pcts[pid]["under"]:.1f}% Over {pcts[pid]["over"]:.1f}%')
     print()
-    return avg
+    return avg, pcts
 
 
 def load_nfsp_agents(env, checkpoint_dir, episode_tag, new_rl_lr=None, new_sl_lr=None):
@@ -186,30 +206,34 @@ def main():
             new_sl_lr=args.sl_learning_rate
         )
         if args.resume_training:
-            nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, agents=nfsp_agents, start_episode=args.load_checkpoint)
+            rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.001
+            sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005
+            nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, agents=nfsp_agents, start_episode=args.load_checkpoint, rl_lr=rl_lr, sl_lr=sl_lr)
     else:
-        rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.01
+        rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.001
         sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005
         nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, rl_lr=rl_lr, sl_lr=sl_lr)
 
     # Phase 2: Hybrid MC-NFSP evaluation
-    hybrid_avg = run_hybrid_evaluation(
+    hybrid_avg, hybrid_pcts = run_hybrid_evaluation(
         env, nfsp_agents, args.hybrid_games,
         args.mcts_depth, args.mcts_simulations
     )
 
     # Phase 3: Pure NFSP comparison
-    nfsp_avg = run_pure_nfsp_evaluation(env, nfsp_agents, args.eval_games)
+    nfsp_avg, nfsp_pcts = run_pure_nfsp_evaluation(env, nfsp_agents, args.eval_games)
 
     # Summary
-    print('═' * 60)
+    print('═' * 80)
     print('  RESULTS COMPARISON')
-    print('═' * 60)
-    print(f'  {"Player":<10} {"Hybrid MC-NFSP":>15} {"Pure NFSP":>15}')
-    print(f'  {"─"*10} {"─"*15} {"─"*15}')
+    print('═' * 80)
+    print(f'  {"Player":<10} {"Hybrid MC-NFSP":>30} {"Pure NFSP":>30}')
+    print(f'  {"─"*10} {"─"*30} {"─"*30}')
     for pid in range(env.num_players):
-        print(f'  Player {pid:<3} {hybrid_avg[pid]:>15.4f} {nfsp_avg[pid]:>15.4f}')
-    print('═' * 60)
+        h_str = f'Payoff {hybrid_avg[pid]:.2f} (Won {hybrid_pcts[pid]["won"]:.1f}%)'
+        n_str = f'Payoff {nfsp_avg[pid]:.2f} (Won {nfsp_pcts[pid]["won"]:.1f}%)'
+        print(f'  Player {pid:<3} {h_str:>30} {n_str:>30}')
+    print('═' * 80)
     print('\n=== Done ===')
 
 

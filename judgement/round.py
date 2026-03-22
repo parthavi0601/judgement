@@ -75,7 +75,7 @@ class JudgementRound:
             lead_suit = self.current_trick[0][1].suit if self.current_trick else None
             return JudgementJudger.get_legal_play_actions(player, lead_suit)
 
-    def step(self, action_id: int) -> Optional[int]:
+    def step(self, action_id: int) -> Optional[float]:
         """
         Execute action. Returns dense reward for the acting player (or None during bidding).
         Updates current_player_id for next turn.
@@ -88,10 +88,28 @@ class JudgementRound:
             return self._step_play(action_id, player)
 
     def _step_bid(self, action_id: int, player: JudgementPlayer) -> None:
-        """Process a bid action."""
+        """Process a bid action and return a heuristic dense reward for bidding."""
         bid_value = JudgementJudger.action_id_to_bid(action_id)
         player.bid = bid_value
         self.bids_made += 1
+
+        # Calculate carefully tuned bid reward based on hand strength heuristic
+        # expected_tricks = 0.0
+        # for c in player.hand:
+        #     if c.suit == self.trump_suit:
+        #         if c.rank_index >= 12: expected_tricks += 1.0     # Ace
+        #         elif c.rank_index >= 11: expected_tricks += 0.8   # King
+        #         elif c.rank_index >= 9: expected_tricks += 0.5    # 10, J, Q
+        #         else: expected_tricks += 0.2                      # low trumps
+        #     else:
+        #         if c.rank_index >= 12: expected_tricks += 0.5     # Ace
+        #         elif c.rank_index >= 10: expected_tricks += 0.2   # Q, K
+                
+        # Shape reward based on absolute deviation from expected tricks
+        # perfect match: +0.5, off by 1: +0.2, off by 2: -0.1, max penalty: -1.0
+        # diff = abs(bid_value - expected_tricks)
+        # bid_reward = max(-1.0, 0.5 - (0.3 * diff))
+        # self.dense_rewards[player.player_id] += bid_reward
 
         if self.bids_made >= self.num_players:
             # All players have bid — transition to trick-taking

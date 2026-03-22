@@ -42,6 +42,7 @@ class JudgementEnv(Env):
         size += 1        # is_bidding flag
         size += self.num_players  # current_player (one-hot)
         size += 1        # round progress (round_index / total_rounds)
+        size += 6        # hand strength features (trump and non-trump)
         return size
 
     def _extract_state(self, state):
@@ -124,6 +125,28 @@ class JudgementEnv(Env):
         total = state['total_rounds'] if state['total_rounds'] > 0 else 1
         obs_parts.append(np.array([state['round_index'] / total], dtype=np.float32))
 
+        # 12. Hand strength features
+        hand = state['hand']
+        if hand and num_cards > 0:
+            trump_cards = [c for c in hand if c.suit == trump_suit]
+            non_trump_cards = [c for c in hand if c.suit != trump_suit]
+
+            trump_count = len(trump_cards) / num_cards
+            trump_high = sum(1 for c in trump_cards if c.rank_index >= 10) / num_cards
+            trump_avg = sum(c.rank_index for c in trump_cards) / (len(trump_cards) * 12.0) if trump_cards else 0.0
+
+            non_trump_count = len(non_trump_cards) / num_cards
+            non_trump_high = sum(1 for c in non_trump_cards if c.rank_index >= 10) / num_cards
+            non_trump_avg = sum(c.rank_index for c in non_trump_cards) / (len(non_trump_cards) * 12.0) if non_trump_cards else 0.0
+        else:
+            trump_count = trump_high = trump_avg = 0.0
+            non_trump_count = non_trump_high = non_trump_avg = 0.0
+            
+        obs_parts.append(np.array([
+            trump_count, trump_high, trump_avg,
+            non_trump_count, non_trump_high, non_trump_avg
+        ], dtype=np.float32))
+
         obs = np.concatenate(obs_parts)
         legal_actions = state['legal_actions']
         legal_actions_dict = OrderedDict({a: None for a in legal_actions})
@@ -132,17 +155,18 @@ class JudgementEnv(Env):
         extracted['legal_actions'] = legal_actions_dict
         extracted['raw_legal_actions'] = list(legal_actions_dict.keys())
         extracted['raw_obs'] = obs
+        extracted['dense_rewards'] = state.get('dense_rewards', [0.0] * self.num_players)
         return extracted
 
     def get_payoffs(self):
         """
         Get final payoffs for all players.
-        Normalized to roughly [-1, 1] based on score range.
+        Scores are already binary (-1.0 or 1.0) per round from Phase 1a.
         """
         scores = np.array([p.score for p in self.game.players])
-        # Normalize: theoretical max per round is ~23 (10+13), 13 rounds → ~299
-        max_possible = 13 * 23
-        payoffs = scores / max_possible
+        # If games are multi-round, you might need to divide by num_rounds
+        # to keep the final payoff in [-1, 1]. Assuming 1 round for NFSP training currently:
+        payoffs = scores
         return payoffs
 
     def get_dense_rewards(self):

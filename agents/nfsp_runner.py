@@ -13,6 +13,46 @@ from rlcard.agents.random_agent import RandomAgent
 from rlcard.utils import reorganize
 
 
+def reorganize_dense(trajectories, payoffs):
+    """
+    Reorganize the trajectory to provide dense trick-by-trick rewards.
+
+    Each player transition gets a reward that is the change in accumulated
+    dense rewards between their consecutive states.  On the terminal step
+    the normalized game payoff is added so the Q-network also learns from
+    the final score (bid correctness bonus / penalty).
+
+    Transition format fed to agent.feed():
+        [state, action, reward (float), next_state, done (bool)]
+    """
+    num_players = len(trajectories)
+    new_trajectories = [[] for _ in range(num_players)]
+
+    for player in range(num_players):
+        for i in range(0, len(trajectories[player]) - 2, 2):
+            state = trajectories[player][i]
+            next_state = trajectories[player][i + 2]
+
+            done = (i == len(trajectories[player]) - 3)
+
+            # Per-step dense reward: change in accumulated dense rewards
+            curr_dense = state.get('dense_rewards', [0.0] * num_players)[player]
+            next_dense = next_state.get('dense_rewards', [0.0] * num_players)[player]
+            reward = next_dense - curr_dense
+
+            # On the terminal step, add the final game payoff so the
+            # Q-network also receives the end-of-round score signal
+            if done:
+                reward += payoffs[player]
+
+            transition = trajectories[player][i:i + 3].copy()
+            transition.insert(2, reward)
+            transition.append(done)
+
+            new_trajectories[player].append(transition)
+    return new_trajectories
+
+
 def patch_agent_losses(agent):
     """Monkey patch to track latest losses for logging."""
     agent.latest_sl_loss = 0.0
@@ -35,10 +75,10 @@ def patch_agent_losses(agent):
     return agent
 
 
-def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.01, sl_learning_rate=0.005):
+def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.001, sl_learning_rate=0.005):
     """Create NFSP agents for all players."""
     if hidden_layers is None:
-        hidden_layers = [256, 128, 64]
+        hidden_layers = [1024, 512, 256]
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -48,22 +88,20 @@ def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.
             num_actions=env.num_actions,
             state_shape=env.state_shape[0],
             hidden_layers_sizes=hidden_layers,
-            reservoir_buffer_capacity=50000,
-            anticipatory_param=0.1,
-            batch_size=128,
-            train_every=64,
+            reservoir_buffer_capacity=350000, # Scaled down to prevent OOM
+            anticipatory_param=0.15,
+            batch_size=512,
+            train_every=32,
             rl_learning_rate=rl_learning_rate,
             sl_learning_rate=sl_learning_rate,
             min_buffer_size_to_learn=256,
-            q_replay_memory_size=50000,
+            q_replay_memory_size=350000, # Scaled down to prevent OOM
             q_replay_memory_init_size=256,
-            q_update_target_estimator_every=1000,
-            q_discount_factor=0.99,
-            q_epsilon_start=0.08,
-            q_epsilon_end=0.003,
-            q_epsilon_decay_steps=int(1e5),
-            q_batch_size=128,
-            q_train_every=64,
+            q_update_target_estimator_every=500,
+            q_discount_factor=0.995,  # Critical for terminal bid reward credit assignment in Judgement
+            q_epsilon_start=1.0,
+            q_epsilon_decay_steps=2100000, # Decays over exactly 150,000 episodes (150,000 * 14 steps)
+            q_train_every=32,
             q_mlp_layers=hidden_layers,
             evaluate_with='average_policy',
             device=device,
@@ -111,10 +149,15 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
             if mode == 'w':
                 header = ['episode']
                 for pid in range(env.num_players):
-                    header.extend([f'player_{pid}_avg_payoff', f'player_{pid}_rl_loss', f'player_{pid}_sl_loss'])
+                    header.extend([
+                        f'player_{pid}_avg_payoff', f'player_{pid}_rl_loss', f'player_{pid}_sl_loss',
+                        f'player_{pid}_won_pct', f'player_{pid}_under_pct', f'player_{pid}_over_pct',
+                    ])
                 writer.writerow(header)
 
     rewards_log = []
+    # Track bid outcomes: list of dicts per episode [{pid: 'won'/'under'/'over'}, ...]
+    outcomes_log = []
 
     for episode in range(start_episode + 1, num_episodes + 1):
         # Sample episode policy for each agent
@@ -124,11 +167,25 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
         # Run one episode
         trajectories, payoffs = env.run(is_training=True)
 
-        # Use rlcard's reorganize() to convert raw trajectories into
+        # Track bid outcomes before reorganizing trajectories
+        ep_outcomes = {}
+        for pid in range(env.num_players):
+            p = env.game.players[pid]
+            if p.bid is not None:
+                if p.tricks_won == p.bid:
+                    ep_outcomes[pid] = 'won'
+                elif p.tricks_won < p.bid:
+                    ep_outcomes[pid] = 'under'
+                else:
+                    ep_outcomes[pid] = 'over'
+            else:
+                ep_outcomes[pid] = 'under'  # shouldn't happen
+        outcomes_log.append(ep_outcomes)
+
+        # Use our custom reorganize_dense() to convert raw trajectories into
         # per-player lists of (state, action, reward, next_state, done) tuples.
-        # Each state/next_state is a full dict with 'obs' and 'legal_actions'
-        # keys, which is exactly what DQNAgent.feed() expects.
-        trajectories = reorganize(trajectories, payoffs)
+        # This preserves dense trick-level rewards for the Q-Network.
+        trajectories = reorganize_dense(trajectories, payoffs)
 
         for pid in range(env.num_players):
             for ts in trajectories[pid]:
@@ -139,12 +196,31 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
         # Evaluate
         if verbose and episode % evaluate_every == 0:
             avg_payoffs = np.mean(rewards_log[-evaluate_every:], axis=0)
-            print(f'\n\nEpisode {episode}/{num_episodes}')
+            if start_episode > 0:
+                print(f'\n\nEpisode {episode}/{num_episodes} (resumed from {start_episode}, {num_episodes - episode} remaining)')
+            else:
+                print(f'\n\nEpisode {episode}/{num_episodes}')
             
+            # Compute outcome percentages over the evaluation window
+            window = outcomes_log[-evaluate_every:]
+            outcome_pcts = {}
+            for pid in range(env.num_players):
+                counts = {'won': 0, 'under': 0, 'over': 0}
+                for ep_out in window:
+                    counts[ep_out[pid]] += 1
+                total = len(window)
+                outcome_pcts[pid] = {
+                    'won': counts['won'] / total * 100,
+                    'under': counts['under'] / total * 100,
+                    'over': counts['over'] / total * 100,
+                }
+
             csv_row = [episode]
             for pid in range(env.num_players):
-                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f} | RL loss = {agents[pid].latest_rl_loss:.4f} | SL loss = {agents[pid].latest_sl_loss:.4f}')
-                csv_row.extend([avg_payoffs[pid], agents[pid].latest_rl_loss, agents[pid].latest_sl_loss])
+                pcts = outcome_pcts[pid]
+                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f} | RL loss = {agents[pid].latest_rl_loss:.4f} | SL loss = {agents[pid].latest_sl_loss:.4f} | Won {pcts["won"]:.1f}% Under {pcts["under"]:.1f}% Over {pcts["over"]:.1f}%')
+                csv_row.extend([avg_payoffs[pid], agents[pid].latest_rl_loss, agents[pid].latest_sl_loss,
+                                round(pcts['won'], 2), round(pcts['under'], 2), round(pcts['over'], 2)])
             
             if csv_path is not None:
                 with open(csv_path, 'a', newline='') as f:
@@ -163,12 +239,40 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
 
 def evaluate_agents(env, agents, num_episodes=100):
     """Evaluate trained agents via random games."""
+    # Force greedy evaluation! NFSP defaults to average_policy which 
+    # throws cards probabilistically. We want strict Deterministic argmax.
+    for agent in agents:
+        if hasattr(agent, 'evaluate_with'):
+            agent.evaluate_with = 'best_response'
+
     env.set_agents(agents)
     payoffs_sum = np.zeros(env.num_players)
+    counts = [{'won': 0, 'under': 0, 'over': 0} for _ in range(env.num_players)]
 
     for _ in range(num_episodes):
         _, payoffs = env.run(is_training=False)
         payoffs_sum += payoffs
+        
+        for pid in range(env.num_players):
+            p = env.game.players[pid]
+            if p.bid is not None:
+                if p.tricks_won == p.bid:
+                    counts[pid]['won'] += 1
+                elif p.tricks_won < p.bid:
+                    counts[pid]['under'] += 1
+                else:
+                    counts[pid]['over'] += 1
 
-    avg = payoffs_sum / num_episodes
-    return avg
+    if num_episodes == 0:
+        return payoffs_sum, counts
+
+    avg_payoffs = payoffs_sum / num_episodes
+    pcts = []
+    for pid in range(env.num_players):
+        pcts.append({
+            'won': counts[pid]['won'] / num_episodes * 100,
+            'under': counts[pid]['under'] / num_episodes * 100,
+            'over': counts[pid]['over'] / num_episodes * 100,
+        })
+    
+    return avg_payoffs, pcts

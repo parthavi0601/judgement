@@ -5,6 +5,7 @@ This document outlines the primary command-line workflows for training and evalu
 ## 1. Train From Scratch
 
 This command kicks off a fresh training run for a given number of episodes. Neural Network checkpoints and the `training_metrics.csv` log are saved to `--save-dir`.
+**Note:** The agent now automatically learns using **trick-by-trick Dense Rewards** during this phase, drastically speeding up Q-Network convergence compared to standard RLCard sparse rewards.
 
 ```bash
 uv run main.py \
@@ -75,3 +76,22 @@ uv run main.py \
 - `--eval-games`: Number of matches to run where players use purely the baseline Average Policy. 
 - `--mcts-depth`: Lookahead depth scaling for the hybrid system.
 - `--mcts-simulations`: Leaf expansion iterations per decision tree run.
+
+---
+
+## 4. True ELO Arena (1 Hybrid vs 3 Pure NFSP)
+
+If you want to definitively measure the structural ELO advantage of your MCTS Hybrid model, you must evaluate it against the baseline Pure NFSP agents in a mixed environment. This explicitly drops Player 0 (Hybrid) into a cage with Players 1, 2, and 3 (Pure NFSP).
+
+```bash
+uv run main.py \
+    --load-checkpoint 600000 \
+    --save-dir ./checkpoints \
+    --hybrid-vs-pure-games 100 \
+    --mcts-depth 2 \
+    --mcts-simulations 50 \
+    --eval-games 500
+```
+
+**Options Breakdown:**
+- `--hybrid-vs-pure-games`: The exact number of mixed-environment cage matches to run. Player 0 acts as the Hybrid, while all other players fallback to Pure NFSP.

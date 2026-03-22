@@ -3,10 +3,10 @@ Hybrid MC-NFSP Agent for Judgement (Oh Hell) card game.
 
 Combines MCTS tree search with NFSP policy evaluation:
 - MCTS explores up to max_depth of the agent's OWN moves
-- Beyond max_depth, the trained NFSP average-policy network evaluates the
-  leaf state instead of a random/heuristic rollout
-
-This gives the planning strength of MCTS with the learned evaluation of NFSP.
+- Opponent moves are stochastically sampled from the trained Average Policy (SL Network)
+- Leaf nodes are evaluated via a blend of DQN Q-values and bid-alignment heuristic
+- Bid actions use the same reward heuristic from round.py for shaped rewards
+- Terminal states use compute_round_scores for exact +1/-1 scoring
 """
 
 import copy
@@ -46,61 +46,31 @@ class _MCTSNode:
 
 
 class HybridMCNFSPAgent:
-    """
-    Hybrid Monte Carlo + NFSP agent.
-
-    - Uses MCTS tree search (with game cloning via deepcopy)
-    - Depth counts only the agent's own moves
-    - At leaf nodes (depth >= max_depth), evaluates using the
-      trained NFSP average-policy network
-    - Falls back to score-based heuristic if no NFSP agent is set
-
-    Usage:
-        # After NFSP training:
-        hybrid = HybridMCNFSPAgent(env, player_id=0, nfsp_agent=trained_nfsp)
-        action = hybrid.step(state)
-    """
-
-    def __init__(self, env, agent_player_id: int, nfsp_agent=None,
+    def __init__(self, env, agent_player_id: int, all_nfsp_agents=None,
                  num_simulations: int = 200, max_depth: int = 2,
                  exploration_constant: float = 1.414):
-        """
-        Args:
-            env: JudgementEnv instance (needed for game cloning and state extraction)
-            agent_player_id: Which player this agent controls
-            nfsp_agent: A trained NFSPAgent whose average-policy network is used
-                        for leaf evaluation. If None, falls back to heuristic.
-            num_simulations: Number of MCTS simulations per decision
-            max_depth: Max number of the AGENT'S OWN moves to search ahead
-            exploration_constant: UCB1 exploration parameter
-        """
         self.env = env
         self.agent_player_id = agent_player_id
-        self.nfsp_agent = nfsp_agent
+        self.all_nfsp_agents = all_nfsp_agents
+        self.nfsp_agent = all_nfsp_agents[agent_player_id] if all_nfsp_agents else None
         self.num_simulations = num_simulations
         self.max_depth = max_depth
         self.exploration_constant = exploration_constant
         self.use_raw = True
 
-    # ── RLCard agent interface ───────────────────────────────────────────
-
     def step(self, state) -> int:
-        """Choose action during training."""
         return self._run_mcts(state)
 
     def eval_step(self, state):
-        """Choose action during evaluation."""
         action = self._run_mcts(state)
         return action, {'agent': 'hybrid_mc_nfsp'}
-
-    # ── MCTS core ────────────────────────────────────────────────────────
 
     def _run_mcts(self, state) -> int:
         legal_actions = list(state['legal_actions'].keys())
         if len(legal_actions) <= 1:
             return legal_actions[0] if legal_actions else 0
 
-        root = _MCTSNode()
+        root = _MCTSNode(player_id=self.agent_player_id)
 
         for _ in range(self.num_simulations):
             game_clone = copy.deepcopy(self.env.game)
@@ -109,27 +79,69 @@ class HybridMCNFSPAgent:
         if not root.children:
             return int(np.random.choice(legal_actions))
 
-        # Select action with most visits (robust child selection)
         return max(root.children.keys(), key=lambda a: root.children[a].visits)
 
+    def _sample_opponent_action(self, game, acting_player_id, legal_actions) -> int:
+        """Sample an action using the specific opponent's NFSP Average Policy."""
+        if not self.all_nfsp_agents or acting_player_id >= len(self.all_nfsp_agents):
+            return int(np.random.choice(legal_actions))
+
+        opp_agent = self.all_nfsp_agents[acting_player_id]
+        if opp_agent is None or not hasattr(opp_agent, 'policy_network'):
+            return int(np.random.choice(legal_actions))
+
+        raw_state = game.get_state(acting_player_id)
+        extracted = self.env._extract_state(raw_state)
+        obs = extracted['obs']
+
+        obs_tensor = torch.from_numpy(np.expand_dims(obs, axis=0)).float()
+        device = next(opp_agent.policy_network.parameters()).device
+        obs_tensor = obs_tensor.to(device)
+
+        with torch.no_grad():
+            log_probs = opp_agent.policy_network(obs_tensor).cpu().numpy()[0]
+
+        probs = np.exp(log_probs)
+        legal_probs = probs[legal_actions]
+        sum_probs = legal_probs.sum()
+
+        if sum_probs < 1e-8:
+            return int(np.random.choice(legal_actions))
+
+        legal_probs /= sum_probs
+        return int(np.random.choice(legal_actions, p=legal_probs))
+
     def _simulate(self, root: _MCTSNode, game, legal_actions: List[int]):
-        """One full MCTS simulation: select → expand → evaluate → backprop."""
         node = root
-        depth = 0        # counts only OUR moves
+        depth = 0
         path = [node]
+        bid_reward_bonus = 0.0  # Track bid heuristic reward accumulated in this sim
 
         # ── Selection ──
         current_legal = legal_actions
         while (node.children
                and node.is_fully_expanded(current_legal)
                and not node.is_terminal):
-            node = node.best_child(self.exploration_constant)
-            if not game.is_over():
-                acting_player = game.get_player_id()
-                game.step(node.action)
-                if acting_player == self.agent_player_id:
-                    depth += 1
+
+            acting_player = game.get_player_id()
+            if acting_player == self.agent_player_id:
+                node = node.best_child(self.exploration_constant)
+                action = node.action
+                depth += 1
+            else:
+                action = self._sample_opponent_action(game, acting_player, current_legal)
+                if action not in node.children:
+                    break
+                node = node.children[action]
+
+            # Track bid heuristic if our agent is bidding
+            if (acting_player == self.agent_player_id
+                    and game.current_round and game.current_round.is_bidding):
+                bid_reward_bonus += self._bid_reward_heuristic(game, action)
+
+            game.step(action)
             path.append(node)
+
             if game.is_over():
                 node.is_terminal = True
                 break
@@ -138,117 +150,173 @@ class HybridMCNFSPAgent:
         # ── Expansion ──
         if not node.is_terminal and not game.is_over() and depth < self.max_depth:
             current_legal = game._get_legal_actions()
-            unexplored = [a for a in current_legal if a not in node.children]
-            if unexplored:
-                action = int(np.random.choice(unexplored))
-                acting_player = game.get_player_id()
+            acting_player = game.get_player_id()
+
+            if acting_player == self.agent_player_id:
+                unexplored = [a for a in current_legal if a not in node.children]
+                if unexplored:
+                    action = int(np.random.choice(unexplored))
+                else:
+                    action = None
+            else:
+                action = self._sample_opponent_action(game, acting_player, current_legal)
+
+            if action is not None and action not in node.children:
                 child = _MCTSNode(parent=node, action=action, player_id=acting_player)
                 node.children[action] = child
                 node = child
                 path.append(node)
+
+                # Track bid heuristic for expansion action
+                if (acting_player == self.agent_player_id
+                        and game.current_round and game.current_round.is_bidding):
+                    bid_reward_bonus += self._bid_reward_heuristic(game, action)
 
                 if not game.is_over():
                     game.step(action)
                     if acting_player == self.agent_player_id:
                         depth += 1
 
+        # ── Fast-forward opponents to reach our next turn ──
+        while not game.is_over() and game.get_player_id() != self.agent_player_id:
+            acting_player = game.get_player_id()
+            current_legal = game._get_legal_actions()
+            if not current_legal:
+                break
+            action = self._sample_opponent_action(game, acting_player, current_legal)
+            game.step(action)
+
         # ── Leaf Evaluation ──
         if game.is_over():
             reward = self._score_terminal(game)
-        elif depth >= self.max_depth and self.nfsp_agent is not None:
-            # NFSP policy evaluation at the frontier
+        elif self.nfsp_agent is not None:
             reward = self._nfsp_evaluate(game)
         else:
-            # Fallback: heuristic evaluation
             reward = self._heuristic_evaluate(game)
+
+        # Blend in bid heuristic bonus (weighted down so it guides but doesn't dominate)
+        reward += 0.15 * bid_reward_bonus
+
+        reward = float(np.clip(reward, -1.0, 1.0))
 
         # ── Backpropagation ──
         for n in path:
             n.visits += 1
             n.total_reward += reward
 
-    # ── Evaluation functions ─────────────────────────────────────────────
+    def _bid_reward_heuristic(self, game, bid_action: int) -> float:
+        """
+        Evaluate bid quality using the same hand-strength heuristic from round.py.
+        Returns a shaped reward in roughly [-1.0, +0.5].
+        """
+        if bid_action >= 14:
+            return 0.0  # Not a bid action
+
+        bid_value = bid_action
+        player = game.players[self.agent_player_id]
+        trump_suit = game.current_round.trump_suit if game.current_round else None
+
+        expected_tricks = self._estimate_tricks(player.hand, trump_suit)
+
+        diff = abs(bid_value - expected_tricks)
+        return max(-1.0, 0.5 - (0.3 * diff))
+
+    def _estimate_tricks(self, hand, trump_suit) -> float:
+        """Estimate expected tricks based on hand strength (matches round.py heuristic)."""
+        expected = 0.0
+        for c in hand:
+            if c.suit == trump_suit:
+                if c.rank_index >= 12:
+                    expected += 1.0      # Ace of trump
+                elif c.rank_index >= 11:
+                    expected += 0.8      # King of trump
+                elif c.rank_index >= 9:
+                    expected += 0.5      # 10, J, Q of trump
+                else:
+                    expected += 0.2      # low trumps
+            else:
+                if c.rank_index >= 12:
+                    expected += 0.5      # Ace off-suit
+                elif c.rank_index >= 10:
+                    expected += 0.2      # Q, K off-suit
+        return expected
 
     def _score_terminal(self, game) -> float:
-        """Evaluate a finished game by comparing our score to best."""
-        scores = [p.score for p in game.players]
-        our_score = scores[self.agent_player_id]
-        max_abs = max(abs(s) for s in scores) or 1.0
-        return our_score / max_abs
+        """Use the game's official scoring: +1.0 for exact bid, -1.0 for miss."""
+        from judgement.judger import JudgementJudger
+        scores = JudgementJudger.compute_round_scores(game.players)
+        return scores[self.agent_player_id]
 
     def _nfsp_evaluate(self, game) -> float:
         """
-        Use the NFSP average-policy network to evaluate a leaf state.
-
-        Extracts the observation from the cloned game, feeds it through the
-        NFSP policy network, and returns an estimated value:
-          - Higher probability on the best legal action → higher value
-          - Uses the max action probability among legal actions as the value
-            estimate, scaled to [-1, 1]
+        Evaluate leaf using NFSP DQN Q-values blended with bid alignment.
+        The Q-value captures learned strategic value; bid alignment adds
+        explicit progress tracking that raw Q-values may underweight.
         """
-        # Build the raw state from the cloned game
         pid = game.get_player_id()
-        raw_state = game.get_state(pid)
+        if pid != self.agent_player_id:
+            # If it's not our turn (shouldn't happen after fast-forward), use heuristic
+            return self._heuristic_evaluate(game)
 
-        # Extract numeric observation using the env's method
+        raw_state = game.get_state(pid)
         extracted = self.env._extract_state(raw_state)
         obs = extracted['obs']
         legal_actions = list(extracted['legal_actions'].keys())
 
         if not legal_actions:
-            return 0.0
-
-        # Get action probabilities from the NFSP average policy
-        obs_tensor = np.expand_dims(obs, axis=0)
-        obs_tensor = torch.from_numpy(obs_tensor).float()
-
-        if hasattr(self.nfsp_agent, 'policy_network'):
-            device = next(self.nfsp_agent.policy_network.parameters()).device
-            obs_tensor = obs_tensor.to(device)
-            with torch.no_grad():
-                log_probs = self.nfsp_agent.policy_network(obs_tensor).cpu().numpy()[0]
-            probs = np.exp(log_probs)
-        else:
-            # Fallback if nfsp_agent doesn't have policy_network
             return self._heuristic_evaluate(game)
 
-        # Value estimate: confidence of the best legal action
-        # High confidence → agent has a clear best play → good state
-        # Low/uniform confidence → uncertain → neutral state
-        legal_probs = probs[legal_actions]
-        legal_probs = legal_probs / (legal_probs.sum() + 1e-8)
+        obs_tensor = torch.from_numpy(np.expand_dims(obs, axis=0)).float()
 
-        # Combine: max probability (exploitation signal) + entropy (uncertainty signal)
-        max_prob = np.max(legal_probs)
-        entropy = -np.sum(legal_probs * np.log(legal_probs + 1e-8))
-        max_entropy = np.log(len(legal_actions) + 1e-8)
-        normalized_entropy = entropy / (max_entropy + 1e-8)
+        q_value = None
+        if hasattr(self.nfsp_agent, '_rl_agent') and hasattr(self.nfsp_agent._rl_agent, 'q_estimator'):
+            q_estimator = self.nfsp_agent._rl_agent.q_estimator
+            device = next(q_estimator.qnet.parameters()).device
+            obs_tensor = obs_tensor.to(device)
+            with torch.no_grad():
+                q_values = q_estimator.qnet(obs_tensor).cpu().numpy()[0]
 
-        # Higher max_prob and lower entropy → better state for us
-        # Also factor in our current score alignment with bid
-        p = game.players[self.agent_player_id]
-        bid_alignment = 0.0
-        if p.bid is not None:
-            remaining = p.bid - p.tricks_won
-            if remaining == 0:
-                bid_alignment = 0.3  # met bid, good position
-            elif remaining > 0:
-                bid_alignment = -0.05 * remaining  # still need tricks
-            else:
-                bid_alignment = -0.1 * abs(remaining)  # over bid
+            legal_q_values = q_values[legal_actions]
+            q_value = float(np.max(legal_q_values))
+            q_value = np.clip(q_value, -1.0, 1.0)
 
-        # Final value: weighted combination
-        value = (max_prob * 0.5) + ((1.0 - normalized_entropy) * 0.2) + bid_alignment
-        return np.clip(value, -1.0, 1.0)
+        if q_value is not None:
+            # Blend Q-value (70%) with bid-alignment heuristic (30%)
+            heuristic = self._heuristic_evaluate(game)
+            return 0.7 * q_value + 0.3 * heuristic
+        else:
+            return self._heuristic_evaluate(game)
 
     def _heuristic_evaluate(self, game) -> float:
-        """Fallback heuristic when NFSP agent is not available."""
+        """
+        Non-terminal evaluation using bid alignment.
+        Primary signal: how well is the agent tracking toward its bid?
+        """
         p = game.players[self.agent_player_id]
-        reward = p.score / max(abs(p.score), 1) if p.score != 0 else 0
-        if p.bid is not None:
-            remaining = p.bid - p.tricks_won
-            if remaining == 0:
-                reward += 0.5
+
+        if p.bid is None:
+            return 0.0
+
+        tricks_remaining = 0
+        if game.current_round:
+            tricks_remaining = game.current_round.num_cards - game.current_round.tricks_played
+
+        needed = p.bid - p.tricks_won
+
+        if needed == 0:
+            # Already met bid — good position, reward proportional to
+            # how few tricks remain (fewer = safer)
+            total = game.current_round.num_cards if game.current_round else 1
+            safety = 1.0 - (tricks_remaining / max(total, 1))
+            return 0.3 + 0.4 * safety
+        elif needed > 0:
+            if tricks_remaining >= needed:
+                # Still achievable — mild optimism
+                achievability = needed / max(tricks_remaining, 1)
+                return 0.1 * (1.0 - achievability)
             else:
-                reward -= 0.1 * abs(remaining)
-        return np.clip(reward, -1.0, 1.0)
+                # Impossible to make bid — penalize
+                return -0.5
+        else:
+            # Over bid — penalize based on how much over
+            return float(np.clip(-0.3 * abs(needed), -1.0, 0.0))

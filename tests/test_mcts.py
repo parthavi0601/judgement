@@ -1,4 +1,4 @@
-"""Tests for the MCTS agent depth counting."""
+"""Tests for the MCTS agent with game cloning and bid heuristics."""
 
 import sys
 import os
@@ -50,54 +50,83 @@ class TestMCTSNode:
 
 class TestJudgementMCTSAgent:
 
-    def _make_dummy_state(self, legal_actions):
-        """Create a minimal state dict for testing."""
-        obs = np.zeros(400, dtype=np.float32)
-        # Set some hand cards
-        obs[0] = 1  # 2S
-        obs[12] = 1  # AS
-        return {
-            'obs': obs,
-            'legal_actions': {a: None for a in legal_actions},
-            'raw_legal_actions': legal_actions,
-            'raw_obs': obs,
-        }
-
-    def test_single_legal_action(self):
-        """With only one legal action, returns it immediately."""
-        agent = JudgementMCTSAgent(num_simulations=10, max_depth=2)
-        state = self._make_dummy_state([14])  # only one card
-        action = agent.step(state)
-        assert action == 14
+    def _make_env_and_agent(self, num_simulations=20, max_depth=1):
+        """Create a test env and MCTS agent."""
+        from rlcard.envs.registration import register, make
+        try:
+            register(env_id='judgement', entry_point='judgement.env:JudgementEnv')
+        except ValueError:
+            pass
+        env = make('judgement', config={
+            'seed': 42,
+            'allow_step_back': False,
+            'game_num_players': 4,
+        })
+        agent = JudgementMCTSAgent(
+            env=env,
+            agent_player_id=0,
+            num_simulations=num_simulations,
+            max_depth=max_depth,
+        )
+        return env, agent
 
     def test_returns_legal_action(self):
         """MCTS returns a legal action."""
-        agent = JudgementMCTSAgent(num_simulations=50, max_depth=2)
-        legal = [14, 15, 20, 25]
-        state = self._make_dummy_state(legal)
+        env, agent = self._make_env_and_agent(num_simulations=30, max_depth=1)
+        state, _ = env.reset()
+        legal = list(state['legal_actions'].keys())
         action = agent.step(state)
         assert action in legal
 
     def test_eval_step(self):
         """eval_step returns action and info dict."""
-        agent = JudgementMCTSAgent(num_simulations=10, max_depth=1)
-        state = self._make_dummy_state([0, 1, 2])
+        env, agent = self._make_env_and_agent(num_simulations=10, max_depth=1)
+        state, _ = env.reset()
         action, info = agent.eval_step(state)
-        assert action in [0, 1, 2]
+        legal = list(state['legal_actions'].keys())
+        assert action in legal
         assert isinstance(info, dict)
+        assert info['agent'] == 'mcts'
+
+    def test_single_legal_action(self):
+        """With one legal action, returns it immediately."""
+        env, agent = self._make_env_and_agent()
+        state = {
+            'legal_actions': {5: None},
+            'raw_legal_actions': [5],
+            'obs': np.zeros(454, dtype=np.float32),
+            'raw_obs': np.zeros(454, dtype=np.float32),
+        }
+        action = agent.step(state)
+        assert action == 5
 
     def test_depth_parameter(self):
         """Different depth values create valid agents."""
         for depth in [1, 2, 3]:
-            agent = JudgementMCTSAgent(num_simulations=5, max_depth=depth)
+            env, agent = self._make_env_and_agent(num_simulations=10, max_depth=depth)
             assert agent.max_depth == depth
-            state = self._make_dummy_state([14, 15])
+            state, _ = env.reset()
+            legal = list(state['legal_actions'].keys())
             action = agent.step(state)
-            assert action in [14, 15]
+            assert action in legal
 
-    def test_bid_evaluation(self):
-        """Agent can handle bidding actions."""
-        agent = JudgementMCTSAgent(num_simulations=20, max_depth=2)
-        state = self._make_dummy_state([0, 1, 2, 3])  # bid actions
-        action = agent.step(state)
-        assert action in [0, 1, 2, 3]
+    def test_bid_heuristic(self):
+        """The bid heuristic produces reasonable estimates."""
+        env, agent = self._make_env_and_agent()
+        # The agent should have an _estimate_tricks method
+        assert hasattr(agent, '_estimate_tricks')
+        # With an empty hand, estimated tricks should be 0
+        assert agent._estimate_tricks([], 'S') == 0.0
+
+    def test_terminal_scoring(self):
+        """Terminal scoring uses compute_round_scores (returns +1 or -1)."""
+        env, agent = self._make_env_and_agent()
+        # Run a full game to get a terminal state
+        env.reset()
+        while not env.game.is_over():
+            legal = env.game._get_legal_actions()
+            if legal:
+                action = np.random.choice(legal)
+                env.game.step(action)
+        score = agent._score_terminal(env.game)
+        assert score in [1.0, -1.0, 0.0]

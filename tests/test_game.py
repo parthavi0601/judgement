@@ -95,28 +95,28 @@ class TestJudgementJudger:
         assert len(actions) == 2  # both cards
 
     def test_scoring_exact_bid(self):
-        """Exact bid: +10 + tricks_won."""
+        """Exact bid: +1.0 (binary scoring)."""
         players = [JudgementPlayer(0)]
         players[0].bid = 3
         players[0].tricks_won = 3
         scores = JudgementJudger.compute_round_scores(players)
-        assert scores[0] == 13.0  # 10 + 3
+        assert scores[0] == 1.0
 
     def test_scoring_miss_bid(self):
-        """Missed bid: -|bid - tricks_won|."""
+        """Missed bid: -1.0 (binary scoring)."""
         players = [JudgementPlayer(0)]
         players[0].bid = 3
         players[0].tricks_won = 1
         scores = JudgementJudger.compute_round_scores(players)
-        assert scores[0] == -2.0  # -|3-1|
+        assert scores[0] == -1.0
 
     def test_scoring_zero_bid_exact(self):
-        """Bid 0, take 0: +10."""
+        """Bid 0, take 0: +1.0 (binary scoring)."""
         players = [JudgementPlayer(0)]
         players[0].bid = 0
         players[0].tricks_won = 0
         scores = JudgementJudger.compute_round_scores(players)
-        assert scores[0] == 10.0  # 10 + 0
+        assert scores[0] == 1.0
 
 
 class TestJudgementGame:

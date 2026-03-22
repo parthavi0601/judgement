@@ -62,7 +62,7 @@ def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulati
         agent = HybridMCNFSPAgent(
             env=env,
             agent_player_id=pid,
-            nfsp_agent=nfsp_agents[pid],
+            all_nfsp_agents=nfsp_agents,
             num_simulations=mcts_simulations,
             max_depth=mcts_depth,
         )
@@ -116,6 +116,66 @@ def run_pure_nfsp_evaluation(env, nfsp_agents, num_games):
             print(f'  Player {pid}: Won {pcts[pid]["won"]:.1f}% Under {pcts[pid]["under"]:.1f}% Over {pcts[pid]["over"]:.1f}%')
     print()
     return avg, pcts
+def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_depth, mcts_simulations):
+    """Phase 4: Evaluate Hybrid vs Pure across all 4 seating positions for fair ELO."""
+    from agents.hybrid_agent import HybridMCNFSPAgent
+
+    total_games = num_games_per_seat * 4
+    print(f'=== Phase 4: True Arena - Hybrid vs Pure ({num_games_per_seat} games per seat, {total_games} total) ===')
+
+    hybrid_stats = {'payoff': 0.0, 'won': 0}
+    pure_stats = {'payoff': 0.0, 'won': 0}
+
+    for hybrid_pid in range(env.num_players):
+        print(f'\n  --- Testing Hybrid Agent in Seat P{hybrid_pid} ---')
+        mixed_agents = []
+        for pid in range(env.num_players):
+            if pid == hybrid_pid:
+                agent = HybridMCNFSPAgent(
+                    env=env,
+                    agent_player_id=pid,
+                    all_nfsp_agents=nfsp_agents,
+                    num_simulations=mcts_simulations,
+                    max_depth=mcts_depth,
+                )
+                mixed_agents.append(agent)
+            else:
+                nfsp_agents[pid].evaluate_with = 'best_response'
+                mixed_agents.append(nfsp_agents[pid])
+
+        env.set_agents(mixed_agents)
+        
+        for game_idx in range(1, num_games_per_seat + 1):
+            _, payoffs = env.run(is_training=False)
+            for pid in range(env.num_players):
+                p = env.game.players[pid]
+                is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
+                
+                if pid == hybrid_pid:
+                    hybrid_stats['payoff'] += payoffs[pid]
+                    hybrid_stats['won'] += is_won
+                else:
+                    pure_stats['payoff'] += payoffs[pid]
+                    pure_stats['won'] += is_won
+
+            if game_idx % max(1, num_games_per_seat // 5) == 0:
+                print(f'  Seat P{hybrid_pid}: Game {game_idx}/{num_games_per_seat} complete.')
+
+    # Calculate final averages
+    h_avg_payoff = hybrid_stats['payoff'] / total_games
+    h_win_pct = (hybrid_stats['won'] / total_games) * 100
+
+    p_avg_payoff = pure_stats['payoff'] / (total_games * 3) # 3 pure agents per game
+    p_win_pct = (pure_stats['won'] / (total_games * 3)) * 100
+
+    h_str = f"Payoff {h_avg_payoff:.4f} (Won {h_win_pct:.1f}%)"
+    p_str = f"Payoff {p_avg_payoff:.4f} (Won {p_win_pct:.1f}%)"
+    print(f'\n  Arena Results Across All Seats:')
+    print(f'    Hybrid MCNFSP : {h_str}')
+    print(f'    Pure NFSP     : {p_str}\n')
+    
+    return {'hybrid': {'payoff': h_avg_payoff, 'win_pct': h_win_pct},
+            'pure':   {'payoff': p_avg_payoff, 'win_pct': p_win_pct}}
 
 
 def load_nfsp_agents(env, checkpoint_dir, episode_tag, new_rl_lr=None, new_sl_lr=None):
@@ -170,10 +230,12 @@ def main():
                         help='Hybrid MC-NFSP evaluation games (Phase 2)')
     parser.add_argument('--mcts-depth', type=int, default=2,
                         help='MCTS max depth (counts only agent own moves)')
-    parser.add_argument('--mcts-simulations', type=int, default=50,
-                        help='MCTS simulations per decision')
+    parser.add_argument('--mcts-simulations', type=int, default=200,
+                        help='MCTS simulations per decision (recommended: 200 for depth 2, 500 for depth 3)')
     parser.add_argument('--eval-games', type=int, default=20,
                         help='Pure NFSP evaluation games (Phase 3, for comparison)')
+    parser.add_argument('--hybrid-vs-pure-games', type=int, default=0,
+                        help='Evaluate 1 Hybrid vs 3 Pure agents (Phase 4)')
     parser.add_argument('--evaluate-every', type=int, default=None,
                         help='Evaluate every N episodes')
     parser.add_argument('--checkpoint-every', type=int, default=None,
@@ -223,6 +285,11 @@ def main():
     # Phase 3: Pure NFSP comparison
     nfsp_avg, nfsp_pcts = run_pure_nfsp_evaluation(env, nfsp_agents, args.eval_games)
 
+    # Phase 4: Hybrid vs Pure
+    hvp_results = None
+    if args.hybrid_vs_pure_games > 0:
+        hvp_results = run_hybrid_vs_pure_evaluation(env, nfsp_agents, args.hybrid_vs_pure_games, args.mcts_depth, args.mcts_simulations)
+
     # Summary
     print('═' * 80)
     print('  RESULTS COMPARISON')
@@ -233,6 +300,13 @@ def main():
         h_str = f'Payoff {hybrid_avg[pid]:.2f} (Won {hybrid_pcts[pid]["won"]:.1f}%)'
         n_str = f'Payoff {nfsp_avg[pid]:.2f} (Won {nfsp_pcts[pid]["won"]:.1f}%)'
         print(f'  Player {pid:<3} {h_str:>30} {n_str:>30}')
+        
+    if hvp_results is not None:
+        print('═' * 80)
+        print('  TRUE ARENA ELO (HYBRID VS PURE ALL-SEAT AGGREGATE)')
+        print('═' * 80)
+        print(f'  Hybrid MCNFSP Agent : Payoff {hvp_results["hybrid"]["payoff"]:.4f} (Won {hvp_results["hybrid"]["win_pct"]:.1f}%)')
+        print(f'  Pure NFSP Agents    : Payoff {hvp_results["pure"]["payoff"]:.4f} (Won {hvp_results["pure"]["win_pct"]:.1f}%)')
     print('═' * 80)
     print('\n=== Done ===')
 

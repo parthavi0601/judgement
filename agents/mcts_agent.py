@@ -84,10 +84,13 @@ class JudgementMCTSAgent:
 
         root = MCTSNode()
 
+        # Single deep copy + checkpoint: N lightweight restores instead of N deep copies
+        game_clone = copy.deepcopy(self.env.game)
+        checkpoint = game_clone.save_checkpoint()
+
         for _ in range(self.num_simulations):
-            # Clone the game for simulation
-            game_clone = copy.deepcopy(self.env.game)
             self._one_simulation(root, game_clone, legal_actions)
+            game_clone.restore_checkpoint(checkpoint)
 
         if not root.children:
             return np.random.choice(legal_actions)

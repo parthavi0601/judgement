@@ -14,7 +14,6 @@ import math
 import numpy as np
 import torch
 from typing import List, Optional, Dict
-from collections import OrderedDict
 
 
 class _MCTSNode:
@@ -72,9 +71,22 @@ class HybridMCNFSPAgent:
 
         root = _MCTSNode(player_id=self.agent_player_id)
 
-        for _ in range(self.num_simulations):
-            game_clone = copy.deepcopy(self.env.game)
+        # Single deep copy + checkpoint: N lightweight restores instead of N deep copies
+        game_clone = copy.deepcopy(self.env.game)
+        checkpoint = game_clone.save_checkpoint()
+
+        # Dynamic simulation scaling: if tactical choices are narrow (late seats), 
+        # Monte Carlo rollout variance dominates. Increase sims to stabilize.
+        sims_to_run = self.num_simulations
+        if len(legal_actions) <= 3:
+            sims_to_run *= 4
+        elif len(legal_actions) <= 5:
+            sims_to_run *= 2
+
+        for _ in range(sims_to_run):
+            self._determinize(game_clone)
             self._simulate(root, game_clone, legal_actions)
+            game_clone.restore_checkpoint(checkpoint)
 
         if not root.children:
             return int(np.random.choice(legal_actions))
@@ -110,6 +122,85 @@ class HybridMCNFSPAgent:
 
         legal_probs /= sum_probs
         return int(np.random.choice(legal_actions, p=legal_probs))
+
+    def _determinize(self, game):
+        """
+        Information Set MCTS: Strictly build 'true unknown cards' from the full
+        deck minus known cards (our hand, played cards, revealed trump).
+        Shuffle and deal sizes back to opponents, respecting voids.
+        """
+        if not game.current_round:
+            return
+
+        from judgement.card import JudgementCard
+
+        # 1. Collect all KNOWN cards
+        known_card_ids = set()
+        
+        for c in game.players[self.agent_player_id].hand:
+            known_card_ids.add(c.card_id)
+            
+        if game.current_round.get_trump_card():
+            known_card_ids.add(game.current_round.get_trump_card().card_id)
+            
+        for trick in game.current_round.trick_history:
+            for pid, c in trick:
+                known_card_ids.add(c.card_id)
+                
+        for pid, c in game.current_round.current_trick:
+            known_card_ids.add(c.card_id)
+
+        # 2. Build True Unknown Cards from the 52-card deck
+        true_unknown_cards = []
+        for c in JudgementCard.get_deck():
+            if c.card_id not in known_card_ids:
+                true_unknown_cards.append(c)
+
+        np.random.shuffle(true_unknown_cards)
+
+        # 3. Clear opponent hands and record sizes exactly
+        opp_hand_sizes = {}
+        for i, p in enumerate(game.players):
+            if i != self.agent_player_id:
+                opp_hand_sizes[i] = len(p.hand)
+                p.hand = []
+
+        # 4. Deduce voids based on trick history
+        voids = {i: set() for i in range(game.num_players)}
+        for trick in game.current_round.trick_history:
+            if not trick: continue
+            lead_suit = trick[0][1].suit
+            for pid, c in trick:
+                if c.suit != lead_suit:
+                    voids[pid].add(lead_suit)
+
+        if game.current_round.current_trick:
+            lead_suit = game.current_round.current_trick[0][1].suit
+            for pid, c in game.current_round.current_trick:
+                if c.suit != lead_suit:
+                    voids[pid].add(lead_suit)
+
+        # 5. Greedy deal using MRV (Most Constrained First) to prevent void violations
+        sorted_opps = sorted(opp_hand_sizes.keys(), key=lambda p: len(voids[p]), reverse=True)
+        
+        for pid in sorted_opps:
+            needed = opp_hand_sizes[pid]
+            while needed > 0 and true_unknown_cards:
+                valid_idx = -1
+                for i, c in enumerate(true_unknown_cards):
+                    if c.suit not in voids[pid]:
+                        valid_idx = i
+                        break
+                
+                if valid_idx != -1:
+                    card = true_unknown_cards.pop(valid_idx)
+                    game.players[pid].hand.append(card)
+                    needed -= 1
+                else:
+                    # Fallback constraint violation if strictly necessary
+                    card = true_unknown_cards.pop(0)
+                    game.players[pid].hand.append(card)
+                    needed -= 1
 
     def _simulate(self, root: _MCTSNode, game, legal_actions: List[int]):
         node = root

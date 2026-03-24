@@ -109,6 +109,68 @@ class JudgementGame:
     def is_over(self) -> bool:
         return self._game_over
 
+    def save_checkpoint(self):
+        """
+        Save a lightweight snapshot of the full game state.
+        Cards are immutable so we only copy list references and scalars.
+        Used by MCTS to avoid expensive copy.deepcopy per simulation.
+        """
+        cp = {
+            'round_index': self.round_index,
+            'dealer_index': self.dealer_index,
+            '_game_over': self._game_over,
+            'pending_dense_rewards': list(self.pending_dense_rewards),
+            'player_states': [
+                {
+                    'hand': list(p.hand),
+                    'bid': p.bid,
+                    'tricks_won': p.tricks_won,
+                    'score': p.score,
+                }
+                for p in self.players
+            ],
+        }
+        if self.current_round:
+            rnd = self.current_round
+            cp['round'] = {
+                'is_bidding': rnd.is_bidding,
+                'bids_made': rnd.bids_made,
+                'current_player_id': rnd.current_player_id,
+                'lead_player_id': rnd.lead_player_id,
+                'current_trick': list(rnd.current_trick),
+                'tricks_played': rnd.tricks_played,
+                'trick_history': [list(t) for t in rnd.trick_history],
+                'played_cards': list(rnd.played_cards),
+                'dense_rewards': list(rnd.dense_rewards),
+            }
+        return cp
+
+    def restore_checkpoint(self, cp):
+        """Restore game state from a saved checkpoint."""
+        self.round_index = cp['round_index']
+        self.dealer_index = cp['dealer_index']
+        self._game_over = cp['_game_over']
+        self.pending_dense_rewards = list(cp['pending_dense_rewards'])
+
+        for i, ps in enumerate(cp['player_states']):
+            self.players[i].hand = list(ps['hand'])
+            self.players[i].bid = ps['bid']
+            self.players[i].tricks_won = ps['tricks_won']
+            self.players[i].score = ps['score']
+
+        if 'round' in cp and self.current_round:
+            rnd = self.current_round
+            r = cp['round']
+            rnd.is_bidding = r['is_bidding']
+            rnd.bids_made = r['bids_made']
+            rnd.current_player_id = r['current_player_id']
+            rnd.lead_player_id = r['lead_player_id']
+            rnd.current_trick = list(r['current_trick'])
+            rnd.tricks_played = r['tricks_played']
+            rnd.trick_history = [list(t) for t in r['trick_history']]
+            rnd.played_cards = list(r['played_cards'])
+            rnd.dense_rewards = list(r['dense_rewards'])
+
     def get_player_id(self) -> int:
         if self._game_over:
             return 0

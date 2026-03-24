@@ -179,3 +179,39 @@ class TestJudgementGame:
     def test_num_players(self):
         game = JudgementGame(num_players=4)
         assert game.get_num_players() == 4
+
+    def test_checkpoint_save_restore(self):
+        """save_checkpoint → step → restore_checkpoint returns game to saved state."""
+        game = JudgementGame(num_players=4)
+        game.np_random = np.random.RandomState(42)
+        state, pid = game.init_game()
+
+        # Save checkpoint after init
+        cp = game.save_checkpoint()
+        orig_bids = [p.bid for p in game.players]
+        orig_tricks = [p.tricks_won for p in game.players]
+        orig_hands = [list(p.hand) for p in game.players]
+
+        # Take enough steps to pass bidding (4 bids) + a few card plays
+        for _ in range(8):
+            if game.is_over():
+                break
+            legal = state['legal_actions']
+            if not legal:
+                break
+            action = np.random.choice(legal)
+            state, pid = game.step(action)
+
+        # Something should have changed (bids set, cards played)
+        bids_changed = any(p.bid != ob for p, ob in zip(game.players, orig_bids))
+        hands_changed = any(list(p.hand) != oh for p, oh in zip(game.players, orig_hands))
+        assert bids_changed or hands_changed, "State should have changed after steps"
+
+        # Restore checkpoint
+        game.restore_checkpoint(cp)
+
+        # Everything should be back to original
+        for i, p in enumerate(game.players):
+            assert p.bid == orig_bids[i], f"Player {i} bid not restored"
+            assert p.tricks_won == orig_tricks[i], f"Player {i} tricks not restored"
+            assert list(p.hand) == orig_hands[i], f"Player {i} hand not restored"

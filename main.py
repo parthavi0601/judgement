@@ -6,7 +6,8 @@ for Judgement card game.
 import argparse
 import sys
 import os
-
+import copy
+import numpy as np
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -125,10 +126,15 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
 
     hybrid_stats = {'payoff': 0.0, 'won': 0}
     pure_stats = {'payoff': 0.0, 'won': 0}
+    # Per-seat tracking for detailed comparison
+    seat_stats = [{'h_payoff': 0.0, 'h_won': 0, 'p_payoff': 0.0, 'p_won': 0}
+                  for _ in range(env.num_players)]
 
     for hybrid_pid in range(env.num_players):
-        print(f'\n  --- Testing Hybrid Agent in Seat P{hybrid_pid} ---')
-        mixed_agents = []
+        print(f'\n  --- Testing Seat P{hybrid_pid} ---')
+        
+        # Configure Hybrid agents (1 Hybrid, 3 Pure)
+        hybrid_mixed_agents = []
         for pid in range(env.num_players):
             if pid == hybrid_pid:
                 agent = HybridMCNFSPAgent(
@@ -138,35 +144,64 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
                     num_simulations=mcts_simulations,
                     max_depth=mcts_depth,
                 )
-                mixed_agents.append(agent)
+                hybrid_mixed_agents.append(agent)
             else:
                 nfsp_agents[pid].evaluate_with = 'best_response'
-                mixed_agents.append(nfsp_agents[pid])
+                hybrid_mixed_agents.append(nfsp_agents[pid])
 
-        env.set_agents(mixed_agents)
-        
-        for game_idx in range(1, num_games_per_seat + 1):
-            _, payoffs = env.run(is_training=False)
-            for pid in range(env.num_players):
-                p = env.game.players[pid]
-                is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
-                
-                if pid == hybrid_pid:
-                    hybrid_stats['payoff'] += payoffs[pid]
-                    hybrid_stats['won'] += is_won
-                else:
-                    pure_stats['payoff'] += payoffs[pid]
-                    pure_stats['won'] += is_won
+        # Configure Pure agents (4 Pure)
+        pure_agents_only = []
+        for pid in range(env.num_players):
+            nfsp_agents[pid].evaluate_with = 'best_response'
+            pure_agents_only.append(nfsp_agents[pid])
 
-            if game_idx % max(1, num_games_per_seat // 5) == 0:
-                print(f'  Seat P{hybrid_pid}: Game {game_idx}/{num_games_per_seat} complete.')
+        for game_idx in range(num_games_per_seat):
+            # Generate one initial game state
+            env.set_agents(hybrid_mixed_agents)  # Just to reset
+            state, _ = env.reset()
+            
+            # Save the EXACT game structure as a lightweight dict
+            init_checkpoint = env.game.save_checkpoint()
+            
+            # --- 1) Play game with Hybrid agent in focus seat ---
+            # Environment is already configured with hybrid_mixed_agents
+            hybrid_payoffs = run_copied_env(env, state)
+            
+            p = env.game.players[hybrid_pid]
+            h_is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
+            
+            hybrid_stats['payoff'] += hybrid_payoffs[hybrid_pid]
+            hybrid_stats['won'] += h_is_won
+            seat_stats[hybrid_pid]['h_payoff'] += hybrid_payoffs[hybrid_pid]
+            seat_stats[hybrid_pid]['h_won'] += h_is_won
+            
+            # --- 2) Play EXACT SAME game with Pure NFSP agent in focus seat ---
+            # Restore the pristine initial game state
+            env.game.restore_checkpoint(init_checkpoint)
+            
+            # Since restore_checkpoint doesn't alter env state extraction vars, we re-extract
+            state = env.get_state(env.get_player_id())
+            
+            env.set_agents(pure_agents_only)
+            pure_payoffs = run_copied_env(env, state)
+            
+            p = env.game.players[hybrid_pid]
+            p_is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
+
+            pure_stats['payoff'] += pure_payoffs[hybrid_pid]
+            pure_stats['won'] += p_is_won
+            seat_stats[hybrid_pid]['p_payoff'] += pure_payoffs[hybrid_pid]
+            seat_stats[hybrid_pid]['p_won'] += p_is_won
+
+            if (game_idx + 1) % max(1, num_games_per_seat // 5) == 0:
+                print(f'  Seat P{hybrid_pid}: Game {game_idx + 1}/{num_games_per_seat} (Paired) complete.')
 
     # Calculate final averages
     h_avg_payoff = hybrid_stats['payoff'] / total_games
     h_win_pct = (hybrid_stats['won'] / total_games) * 100
 
-    p_avg_payoff = pure_stats['payoff'] / (total_games * 3) # 3 pure agents per game
-    p_win_pct = (pure_stats['won'] / (total_games * 3)) * 100
+    p_avg_payoff = pure_stats['payoff'] / total_games
+    p_win_pct = (pure_stats['won'] / total_games) * 100
 
     h_str = f"Payoff {h_avg_payoff:.4f} (Won {h_win_pct:.1f}%)"
     p_str = f"Payoff {p_avg_payoff:.4f} (Won {p_win_pct:.1f}%)"
@@ -174,8 +209,28 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
     print(f'    Hybrid MCNFSP : {h_str}')
     print(f'    Pure NFSP     : {p_str}\n')
     
+    # Per-seat averages
+    per_seat = []
+    for sid in range(env.num_players):
+        h_p = seat_stats[sid]['h_payoff'] / num_games_per_seat
+        h_w = (seat_stats[sid]['h_won'] / num_games_per_seat) * 100
+        p_p = seat_stats[sid]['p_payoff'] / num_games_per_seat
+        p_w = (seat_stats[sid]['p_won'] / num_games_per_seat) * 100
+        per_seat.append({'h_payoff': h_p, 'h_win': h_w, 'p_payoff': p_p, 'p_win': p_w})
+
     return {'hybrid': {'payoff': h_avg_payoff, 'win_pct': h_win_pct},
-            'pure':   {'payoff': p_avg_payoff, 'win_pct': p_win_pct}}
+            'pure':   {'payoff': p_avg_payoff, 'win_pct': p_win_pct},
+            'per_seat': per_seat}
+
+
+def run_copied_env(env, current_state):
+    """Run an RLCard environment from a specific starting point until done."""
+    state = current_state
+    player_id = env.get_player_id()
+    while not env.is_over():
+        action, _ = env.agents[player_id].eval_step(state)
+        state, player_id = env.step(action, env.agents[player_id].use_raw)
+    return env.get_payoffs()
 
 
 def load_nfsp_agents(env, checkpoint_dir, episode_tag, new_rl_lr=None, new_sl_lr=None):
@@ -292,22 +347,58 @@ def main():
 
     # Summary
     print('═' * 80)
-    print('  RESULTS COMPARISON')
+    print('  PURE NFSP vs PURE NFSP (all players same type)')
     print('═' * 80)
-    print(f'  {"Player":<10} {"Hybrid MC-NFSP":>30} {"Pure NFSP":>30}')
-    print(f'  {"─"*10} {"─"*30} {"─"*30}')
     for pid in range(env.num_players):
-        h_str = f'Payoff {hybrid_avg[pid]:.2f} (Won {hybrid_pcts[pid]["won"]:.1f}%)'
         n_str = f'Payoff {nfsp_avg[pid]:.2f} (Won {nfsp_pcts[pid]["won"]:.1f}%)'
-        print(f'  Player {pid:<3} {h_str:>30} {n_str:>30}')
-        
+        print(f'  Player {pid:<3} {n_str}')
+
     if hvp_results is not None:
         print('═' * 80)
-        print('  TRUE ARENA ELO (HYBRID VS PURE ALL-SEAT AGGREGATE)')
+        print('  ARENA: HYBRID vs PURE (per seat — 1 Hybrid + 3 Pure per game)')
         print('═' * 80)
-        print(f'  Hybrid MCNFSP Agent : Payoff {hvp_results["hybrid"]["payoff"]:.4f} (Won {hvp_results["hybrid"]["win_pct"]:.1f}%)')
-        print(f'  Pure NFSP Agents    : Payoff {hvp_results["pure"]["payoff"]:.4f} (Won {hvp_results["pure"]["win_pct"]:.1f}%)')
+        print(f'  {"Seat":<10} {"Hybrid (1 agent)":>30} {"Pure (3 opponents avg)":>30}')
+        print(f'  {"─"*10} {"─"*30} {"─"*30}')
+        for pid in range(env.num_players):
+            s = hvp_results['per_seat'][pid]
+            h_str = f'Payoff {s["h_payoff"]:.2f} (Won {s["h_win"]:.1f}%)'
+            p_str = f'Payoff {s["p_payoff"]:.2f} (Won {s["p_win"]:.1f}%)'
+            print(f'  Seat {pid:<5} {h_str:>30} {p_str:>30}')
+        print(f'  {"─"*10} {"─"*30} {"─"*30}')
+        h = hvp_results['hybrid']
+        p = hvp_results['pure']
+        print(f'  {"TOTAL":<10} {f"Payoff {h["payoff"]:.2f} (Won {h["win_pct"]:.1f}%)":>30} {f"Payoff {p["payoff"]:.2f} (Won {p["win_pct"]:.1f}%)":>30}')
     print('═' * 80)
+
+    if hvp_results is not None:
+        # Seat-by-seat: Hybrid vs Pure against same opponent pool
+        print('  SEAT COMPARISON: same seat, same opponents (3 Pure NFSP)')
+        print('  Hybrid (from Arena, Paired) vs Pure (from Arena, Paired)')
+        print('═' * 80)
+        header = f'  {"Seat":<10} {"Hybrid in seat":>30} {"Pure in seat":>30} {"Δ Win%":>10}'
+        print(header)
+        print(f'  {"─"*10} {"─"*30} {"─"*30} {"─"*10}')
+        h_total_win = 0.0
+        p_total_win = 0.0
+        for pid in range(env.num_players):
+            s = hvp_results['per_seat'][pid]
+            h_w = s['h_win']
+            p_w = s['p_win']
+            delta = h_w - p_w
+            h_str = f'Payoff {s["h_payoff"]:.2f} (Won {h_w:.1f}%)'
+            p_str = f'Payoff {s["p_payoff"]:.2f} (Won {p_w:.1f}%)'
+            print(f'  Seat {pid:<5} {h_str:>30} {p_str:>30} {delta:>+9.1f}%')
+            h_total_win += h_w
+            p_total_win += p_w
+        print(f'  {"─"*10} {"─"*30} {"─"*30} {"─"*10}')
+        h_avg = h_total_win / env.num_players
+        p_avg = p_total_win / env.num_players
+        d = h_avg - p_avg
+        avg_h = f'Won {h_avg:.1f}%'
+        avg_p = f'Won {p_avg:.1f}%'
+        print(f'  {"AVG":<10} {avg_h:>30} {avg_p:>30} {d:>+9.1f}%')
+        print('═' * 80)
+
     print('\n=== Done ===')
 
 

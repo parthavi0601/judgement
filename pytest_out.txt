@@ -1,0 +1,83 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.7, pytest-7.4.4, pluggy-1.0.0 -- C:\Users\rpgra\anaconda3\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\rpgra\OneDrive\Desktop\RL\judgement
+plugins: anyio-4.11.0, langsmith-0.4.3
+collecting ... collected 65 items
+
+tests/test_card.py::TestJudgementCard::test_deck_has_52_cards PASSED     [  1%]
+tests/test_card.py::TestJudgementCard::test_unique_card_ids PASSED       [  3%]
+tests/test_card.py::TestJudgementCard::test_card_id_range PASSED         [  4%]
+tests/test_card.py::TestJudgementCard::test_card_id_mapping PASSED       [  6%]
+tests/test_card.py::TestJudgementCard::test_card_str PASSED              [  7%]
+tests/test_card.py::TestJudgementCard::test_card_equality PASSED         [  9%]
+tests/test_card.py::TestJudgementCard::test_card_inequality PASSED       [ 10%]
+tests/test_card.py::TestJudgementCard::test_suits_and_ranks PASSED       [ 12%]
+tests/test_env.py::TestJudgementEnv::test_env_init PASSED                [ 13%]
+tests/test_env.py::TestJudgementEnv::test_state_shape PASSED             [ 15%]
+tests/test_env.py::TestJudgementEnv::test_legal_actions_in_state PASSED  [ 16%]
+tests/test_env.py::TestJudgementEnv::test_step_returns_valid_state PASSED [ 18%]
+tests/test_env.py::TestJudgementEnv::test_run_with_random_agents PASSED  [ 20%]
+tests/test_env.py::TestJudgementEnv::test_payoffs_normalized PASSED      [ 21%]
+tests/test_env.py::TestJudgementEnv::test_multiple_runs PASSED           [ 23%]
+tests/test_game.py::TestJudgementJudger::test_trick_winner_lead_suit PASSED [ 24%]
+tests/test_game.py::TestJudgementJudger::test_trick_winner_trump PASSED  [ 26%]
+tests/test_game.py::TestJudgementJudger::test_trick_winner_highest_trump PASSED [ 27%]
+tests/test_game.py::TestJudgementJudger::test_hook_rule PASSED           [ 29%]
+tests/test_game.py::TestJudgementJudger::test_no_hook_for_non_dealer PASSED [ 30%]
+tests/test_game.py::TestJudgementJudger::test_follow_suit PASSED         [ 32%]
+tests/test_game.py::TestJudgementJudger::test_any_card_when_void PASSED  [ 33%]
+tests/test_game.py::TestJudgementJudger::test_scoring_exact_bid PASSED   [ 35%]
+tests/test_game.py::TestJudgementJudger::test_scoring_miss_bid PASSED    [ 36%]
+tests/test_game.py::TestJudgementJudger::test_scoring_zero_bid_exact PASSED [ 38%]
+tests/test_game.py::TestJudgementGame::test_init_game PASSED             [ 40%]
+tests/test_game.py::TestJudgementGame::test_round_schedule PASSED        [ 41%]
+tests/test_game.py::TestJudgementGame::test_full_game_plays_to_completion PASSED [ 43%]
+tests/test_game.py::TestJudgementGame::test_bidding_phase_transitions PASSED [ 44%]
+tests/test_game.py::TestJudgementGame::test_num_actions PASSED           [ 46%]
+tests/test_game.py::TestJudgementGame::test_num_players PASSED           [ 47%]
+tests/test_game.py::TestJudgementGame::test_checkpoint_save_restore PASSED [ 49%]
+tests/test_hybrid.py::TestMCTSNode::test_ucb1_unexplored PASSED          [ 50%]
+tests/test_hybrid.py::TestMCTSNode::test_ucb1_explored PASSED            [ 52%]
+tests/test_hybrid.py::TestMCTSNode::test_best_child PASSED               [ 53%]
+tests/test_hybrid.py::TestMCTSNode::test_is_fully_expanded PASSED        [ 55%]
+tests/test_hybrid.py::TestHybridAgent::test_returns_legal_action PASSED  [ 56%]
+tests/test_hybrid.py::TestHybridAgent::test_eval_step PASSED             [ 58%]
+tests/test_hybrid.py::TestHybridAgent::test_single_legal_action PASSED   [ 60%]
+tests/test_hybrid.py::TestHybridAgent::test_without_nfsp_falls_back_to_heuristic PASSED [ 61%]
+tests/test_hybrid.py::TestHybridAgent::test_with_nfsp_agents PASSED      [ 63%]
+tests/test_hybrid.py::TestHybridAgent::test_bid_reward_heuristic FAILED  [ 64%]
+tests/test_hybrid.py::TestHybridAgent::test_bid_heuristic_non_bid_action PASSED [ 66%]
+tests/test_hybrid.py::TestHybridAgent::test_terminal_scoring_uses_compute_round_scores PASSED [ 67%]
+tests/test_mcts.py::TestMCTSNode::test_ucb1_unexplored PASSED            [ 69%]
+tests/test_mcts.py::TestMCTSNode::test_ucb1_explored PASSED              [ 70%]
+tests/test_mcts.py::TestMCTSNode::test_best_child PASSED                 [ 72%]
+tests/test_mcts.py::TestMCTSNode::test_is_fully_expanded PASSED          [ 73%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_returns_legal_action PASSED [ 75%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_eval_step PASSED        [ 76%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_single_legal_action PASSED [ 78%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_depth_parameter PASSED  [ 80%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_bid_heuristic PASSED    [ 81%]
+tests/test_mcts.py::TestJudgementMCTSAgent::test_terminal_scoring PASSED [ 83%]
+tests/test_rewards.py::TestDenseRewards::test_won_trick_on_track PASSED  [ 84%]
+tests/test_rewards.py::TestDenseRewards::test_won_trick_over_bid PASSED  [ 86%]
+tests/test_rewards.py::TestDenseRewards::test_lost_trick_met_bid PASSED  [ 87%]
+tests/test_rewards.py::TestDenseRewards::test_lost_trick_still_need PASSED [ 89%]
+tests/test_rewards.py::TestDenseRewards::test_no_bid_no_reward PASSED    [ 90%]
+tests/test_rewards.py::TestDenseRewards::test_won_trick_exactly_met PASSED [ 92%]
+tests/test_rewards.py::TestDenseRewards::test_zero_bid_win PASSED        [ 93%]
+tests/test_rewards.py::TestDenseRewards::test_zero_bid_lose PASSED       [ 95%]
+tests/test_rewards.py::TestDenseRewards::test_lost_trick_already_over PASSED [ 96%]
+tests/test_rewards.py::TestDenseRewards::test_round_scoring_exact PASSED [ 98%]
+tests/test_rewards.py::TestDenseRewards::test_round_scoring_mixed PASSED [100%]
+
+================================== FAILURES ===================================
+__________________ TestHybridAgent.test_bid_reward_heuristic __________________
+tests\test_hybrid.py:131: in test_bid_reward_heuristic
+    reward = agent._bid_reward_heuristic(env.game, 3)
+agents\hybrid_agent.py:459: in _bid_reward_heuristic
+    trump_suit = game.current_round.trump_suit if game.current_round else None
+E   AttributeError: '_CppGameWrapper' object has no attribute 'current_round'
+=========================== short test summary info ===========================
+FAILED tests/test_hybrid.py::TestHybridAgent::test_bid_reward_heuristic - Att...
+======================== 1 failed, 64 passed in 5.29s =========================

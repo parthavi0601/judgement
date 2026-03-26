@@ -1,1 +1,2 @@
-from .game import JudgementGame as Game
+from judgement_cpp import Game
+

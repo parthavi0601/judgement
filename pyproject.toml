@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=42", "pybind11>=2.10.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "rlcard-judgement-main"
 version = "0.1.0"

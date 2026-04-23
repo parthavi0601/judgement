@@ -71,12 +71,9 @@ class JudgementGame:
         # Execute action in current round
         dense_reward = self.current_round.step(action)
 
-        # Track dense rewards
         if dense_reward is not None:
             acting_player = self.current_round.current_player_id
-            # Note: current_player_id already advanced, so we use the trick context
 
-        # Check if current sub-round is over
         if self.current_round.is_over():
             self._finalize_round()
 
@@ -86,7 +83,6 @@ class JudgementGame:
                 self._game_over = True
 
         if self._game_over:
-            # Return state for any player
             state = self.get_state(0)
             return state, 0
 
@@ -99,10 +95,8 @@ class JudgementGame:
         scores = JudgementJudger.compute_round_scores(self.players)
         for i, s in enumerate(scores):
             self.players[i].score += s
-            # Add round-end dense reward
             self.pending_dense_rewards[i] += s
 
-        # Advance round
         self.round_index += 1
         self.dealer_index = (self.dealer_index + 1) % self.num_players
 

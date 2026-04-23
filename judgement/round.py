@@ -30,8 +30,6 @@ class JudgementRound:
         self.dealer.new_round(players, num_cards)
 
         # Trump suit: use fixed rotation order (S→D→C→H)
-        # The revealed trump card (first undealt card) is kept for display,
-        # but the suit follows the fixed rotation.
         self.trump_suit: Optional[str] = self.TRUMP_ORDER[round_index % len(self.TRUMP_ORDER)]
 
         # Phase tracking
@@ -106,27 +104,22 @@ class JudgementRound:
                 elif c.rank_index >= 10: expected_tricks += 0.2   # Q, K
                 
         # Shape reward based on absolute deviation from expected tricks
-        # perfect match: +0.5, off by 1: +0.2, off by 2: -0.1, max penalty: -1.0
         diff = abs(bid_value - expected_tricks)
         bid_reward = max(-1.0, 0.5 - (0.3 * diff))
         self.dense_rewards[player.player_id] += bid_reward
 
         if self.bids_made >= self.num_players:
-            # All players have bid — transition to trick-taking
             self.is_bidding = False
-            # First lead: player left of dealer
             self.lead_player_id = (self.dealer_player_id + 1) % self.num_players
             self.current_player_id = self.lead_player_id
         else:
             self.current_player_id = (self.current_player_id + 1) % self.num_players
 
-        return None  # No dense reward during bidding
-
+        return None  
     def _step_play(self, action_id: int, player: JudgementPlayer) -> float:
         """Process a play card action. Returns dense reward."""
         card_id = JudgementJudger.action_id_to_card_id(action_id)
 
-        # Find the card in hand
         card = None
         for c in player.hand:
             if c.card_id == card_id:
@@ -143,7 +136,6 @@ class JudgementRound:
         dense_reward = 0.0
 
         if len(self.current_trick) >= self.num_players:
-            # Trick complete — determine winner
             winner_id = JudgementJudger.judge_trick(self.current_trick, self.trump_suit)
             self.players[winner_id].tricks_won += 1
             self.trick_history.append(self.current_trick.copy())

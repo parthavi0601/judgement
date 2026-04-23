@@ -1,14 +1,13 @@
-"""
-Main entry point: NFSP training → Hybrid MC-NFSP evaluation pipeline
-for Judgement card game.
-"""
-
-import argparse
-import sys
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+import torch
+if hasattr(torch, 'cuda'):
+    torch.cuda.is_available = lambda: False
+    torch.cuda.device_count = lambda: 0
+
+import sys
 import copy
 import numpy as np
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rlcard.envs.registration import register as rlcard_register, make as rlcard_make
@@ -25,7 +24,7 @@ def register_judgement_env():
         pass  # Already registered
 
 
-def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoint_every=None, agents=None, start_episode=0, rl_lr=0.01, sl_lr=0.005):
+def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoint_every=None, agents=None, start_episode=0, rl_lr=0.01, sl_lr=0.005, use_per=True):
     """Phase 1: Train NFSP agents."""
     from agents.nfsp_runner import train_nfsp
 
@@ -33,6 +32,10 @@ def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoi
     ckpt_freq = checkpoint_every if checkpoint_every else eval_freq * 4
 
     print(f'\n=== Phase 1: NFSP Training ({num_episodes} episodes) ===')
+    if use_per:
+        print('  Replay buffer: Prioritized Experience Replay (PER) — alpha=0.6, beta 0.4→1.0 over 2.1M steps')
+    else:
+        print('  Replay buffer: Uniform (PER disabled)')
     agents = train_nfsp(
         env,
         num_episodes=num_episodes,
@@ -44,12 +47,13 @@ def run_nfsp_training(env, num_episodes, save_dir, evaluate_every=None, checkpoi
         start_episode=start_episode,
         rl_learning_rate=rl_lr,
         sl_learning_rate=sl_lr,
+        use_per=use_per,
     )
     print('\nNFSP training complete.\n')
     return agents
 
 
-def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulations):
+def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulations, logger=None):
     """Phase 2: Evaluate using Hybrid MC-NFSP agents."""
     from agents.hybrid_agent import HybridMCNFSPAgent
 
@@ -75,6 +79,8 @@ def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulati
     counts = [{'won': 0, 'under': 0, 'over': 0} for _ in range(env.num_players)]
     for game_idx in range(1, num_games + 1):
         trajectories, payoffs = env.run(is_training=False)
+        if logger:
+            logger.log_eval_game('hybrid_all', env.game.players, payoffs, env.num_players)
         for pid in range(env.num_players):
             total_payoffs[pid] += payoffs[pid]
             p = env.game.players[pid]
@@ -104,30 +110,31 @@ def run_hybrid_evaluation(env, nfsp_agents, num_games, mcts_depth, mcts_simulati
     return final_avg, pcts
 
 
-def run_pure_nfsp_evaluation(env, nfsp_agents, num_games):
+def run_pure_nfsp_evaluation(env, nfsp_agents, num_games, logger=None):
     """Phase 3: Evaluate pure NFSP for comparison."""
     from agents.nfsp_runner import evaluate_agents
 
     print(f'=== Phase 3: Pure NFSP Evaluation ({num_games} games, for comparison) ===')
     env.set_agents(nfsp_agents)
-    avg, pcts = evaluate_agents(env, nfsp_agents, num_episodes=num_games)
+    avg, pcts = evaluate_agents(env, nfsp_agents, num_episodes=num_games, logger=logger)
     print(f'  Pure NFSP avg payoffs: {[f"{a:.4f}" for a in avg]}')
     if num_games > 0:
         for pid in range(env.num_players):
             print(f'  Player {pid}: Won {pcts[pid]["won"]:.1f}% Under {pcts[pid]["under"]:.1f}% Over {pcts[pid]["over"]:.1f}%')
     print()
     return avg, pcts
-def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_depth, mcts_simulations):
+
+
+def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_depth, mcts_simulations, logger=None):
     """Phase 4: Evaluate Hybrid vs Pure across all 4 seating positions for fair ELO."""
     from agents.hybrid_agent import HybridMCNFSPAgent
 
     total_games = num_games_per_seat * 4
     print(f'=== Phase 4: True Arena - Hybrid vs Pure ({num_games_per_seat} games per seat, {total_games} total) ===')
 
-    hybrid_stats = {'payoff': 0.0, 'won': 0}
+    hybrid_stats = {'payoff': 0.0, 'won': 0, 'opp_payoff': 0.0, 'opp_won': 0.0}
     pure_stats = {'payoff': 0.0, 'won': 0}
-    # Per-seat tracking for detailed comparison
-    seat_stats = [{'h_payoff': 0.0, 'h_won': 0, 'p_payoff': 0.0, 'p_won': 0}
+    seat_stats = [{'h_payoff': 0.0, 'h_won': 0, 'opp_avg_payoff': 0.0, 'opp_avg_won': 0.0, 'p_payoff': 0.0, 'p_won': 0}
                   for _ in range(env.num_players)]
 
     for hybrid_pid in range(env.num_players):
@@ -149,33 +156,43 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
                 nfsp_agents[pid].evaluate_with = 'best_response'
                 hybrid_mixed_agents.append(nfsp_agents[pid])
 
-        # Configure Pure agents (4 Pure)
         pure_agents_only = []
         for pid in range(env.num_players):
             nfsp_agents[pid].evaluate_with = 'best_response'
             pure_agents_only.append(nfsp_agents[pid])
 
         for game_idx in range(num_games_per_seat):
-            # Generate one initial game state
             env.set_agents(hybrid_mixed_agents)  # Just to reset
             state, _ = env.reset()
             
-            # Save the EXACT game structure as a lightweight dict
             init_checkpoint = env.game.save_checkpoint()
             
             # --- 1) Play game with Hybrid agent in focus seat ---
             # Environment is already configured with hybrid_mixed_agents
             hybrid_payoffs = run_copied_env(env, state)
+            if logger:
+                logger.log_hvp_game(hybrid_pid, 'hybrid', env.game.players, hybrid_payoffs, env.num_players)
             
             p = env.game.players[hybrid_pid]
             h_is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
             
+            # Compute the actual average behavior of the 3 Pure Opponents in this game
+            opp_payoffs = [hybrid_payoffs[i] for i in range(env.num_players) if i != hybrid_pid]
+            opp_wins = [1 if (env.game.players[i].bid is not None and env.game.players[i].tricks_won == env.game.players[i].bid) else 0
+                        for i in range(env.num_players) if i != hybrid_pid]
+            opp_avg_p = sum(opp_payoffs) / 3.0
+            opp_avg_w = sum(opp_wins) / 3.0
+
             hybrid_stats['payoff'] += hybrid_payoffs[hybrid_pid]
             hybrid_stats['won'] += h_is_won
+            hybrid_stats['opp_payoff'] += opp_avg_p
+            hybrid_stats['opp_won'] += opp_avg_w
+
             seat_stats[hybrid_pid]['h_payoff'] += hybrid_payoffs[hybrid_pid]
             seat_stats[hybrid_pid]['h_won'] += h_is_won
+            seat_stats[hybrid_pid]['opp_avg_payoff'] += opp_avg_p
+            seat_stats[hybrid_pid]['opp_avg_won'] += opp_avg_w
             
-            # --- 2) Play EXACT SAME game with Pure NFSP agent in focus seat ---
             # Restore the pristine initial game state
             env.game.restore_checkpoint(init_checkpoint)
             
@@ -184,6 +201,8 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
             
             env.set_agents(pure_agents_only)
             pure_payoffs = run_copied_env(env, state)
+            if logger:
+                logger.log_hvp_game(hybrid_pid, 'pure', env.game.players, pure_payoffs, env.num_players)
             
             p = env.game.players[hybrid_pid]
             p_is_won = 1 if (p.bid is not None and p.tricks_won == p.bid) else 0
@@ -199,6 +218,8 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
     # Calculate final averages
     h_avg_payoff = hybrid_stats['payoff'] / total_games
     h_win_pct = (hybrid_stats['won'] / total_games) * 100
+    h_opp_avg_payoff = hybrid_stats['opp_payoff'] / total_games
+    h_opp_win_pct = (hybrid_stats['opp_won'] / total_games) * 100
 
     p_avg_payoff = pure_stats['payoff'] / total_games
     p_win_pct = (pure_stats['won'] / total_games) * 100
@@ -214,13 +235,17 @@ def run_hybrid_vs_pure_evaluation(env, nfsp_agents, num_games_per_seat, mcts_dep
     for sid in range(env.num_players):
         h_p = seat_stats[sid]['h_payoff'] / num_games_per_seat
         h_w = (seat_stats[sid]['h_won'] / num_games_per_seat) * 100
+        opp_p = seat_stats[sid]['opp_avg_payoff'] / num_games_per_seat
+        opp_w = (seat_stats[sid]['opp_avg_won'] / num_games_per_seat) * 100
         p_p = seat_stats[sid]['p_payoff'] / num_games_per_seat
         p_w = (seat_stats[sid]['p_won'] / num_games_per_seat) * 100
-        per_seat.append({'h_payoff': h_p, 'h_win': h_w, 'p_payoff': p_p, 'p_win': p_w})
+        per_seat.append({'h_payoff': h_p, 'h_win': h_w, 'opp_payoff': opp_p, 'opp_win': opp_w, 'p_payoff': p_p, 'p_win': p_w})
 
-    return {'hybrid': {'payoff': h_avg_payoff, 'win_pct': h_win_pct},
+    return {'hybrid': {'payoff': h_avg_payoff, 'win_pct': h_win_pct, 'opp_payoff': h_opp_avg_payoff, 'opp_win_pct': h_opp_win_pct},
             'pure':   {'payoff': p_avg_payoff, 'win_pct': p_win_pct},
             'per_seat': per_seat}
+
+
 
 
 def run_copied_env(env, current_state):
@@ -244,12 +269,35 @@ def load_nfsp_agents(env, checkpoint_dir, episode_tag, new_rl_lr=None, new_sl_lr
         print(f'  Updating learning rates -> RL: {new_rl_lr}, SL: {new_sl_lr}')
     agents = []
     for pid in range(env.num_players):
-        filename = f'nfsp_agent_{pid}_ep{episode_tag}.pt'
+        if str(episode_tag) == 'final':
+            filename = f'nfsp_agent_{pid}_final.pt'
+        else:
+            filename = f'nfsp_agent_{pid}_ep{episode_tag}.pt'
         filepath = os.path.join(checkpoint_dir, filename)
         if not os.path.exists(filepath):
             raise FileNotFoundError(f'Checkpoint not found: {filepath}')
         checkpoint = torch.load(filepath, map_location='cpu', weights_only=False)
+        # Ensure all Tensors and device info in checkpoint are on CPU
+        def to_cpu(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.cpu()
+            elif isinstance(obj, torch.device):
+                return torch.device('cpu')
+            elif isinstance(obj, dict):
+                return {k: to_cpu(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [to_cpu(v) for v in obj]
+            return obj
+        checkpoint = to_cpu(checkpoint)
+        
+        # Explicitly force device strings/objects to cpu
+        if 'device' in checkpoint:
+            checkpoint['device'] = torch.device('cpu')
+        
         agent = NFSPAgent.from_checkpoint(checkpoint)
+        # Ensure models are on CPU (double check)
+        agent.policy_network.cpu()
+        agent.set_device(torch.device('cpu'))
         
         if new_sl_lr is not None:
             agent._sl_learning_rate = new_sl_lr
@@ -278,9 +326,9 @@ def main():
                         help='Override RL learning rate (Q-network) when resuming training')
     parser.add_argument('--sl-learning-rate', type=float, default=None,
                         help='Override SL learning rate (Average Policy) when resuming training')
-    parser.add_argument('--load-checkpoint', type=int, default=None, metavar='EPISODE',
+    parser.add_argument('--load-checkpoint', type=str, default=None, metavar='EPISODE',
                         help='Load pre-trained NFSP from checkpoints at this episode number '
-                             '(e.g. --load-checkpoint 4000). Skips training unless --resume-training is specified.')
+                             '(e.g. --load-checkpoint 4000 or --load-checkpoint final). Skips training unless --resume-training is specified.')
     parser.add_argument('--hybrid-games', type=int, default=10,
                         help='Hybrid MC-NFSP evaluation games (Phase 2)')
     parser.add_argument('--mcts-depth', type=int, default=2,
@@ -291,13 +339,21 @@ def main():
                         help='Pure NFSP evaluation games (Phase 3, for comparison)')
     parser.add_argument('--hybrid-vs-pure-games', type=int, default=0,
                         help='Evaluate 1 Hybrid vs 3 Pure agents (Phase 4)')
+
     parser.add_argument('--evaluate-every', type=int, default=None,
                         help='Evaluate every N episodes')
     parser.add_argument('--checkpoint-every', type=int, default=None,
                         help='Save checkpoint every N episodes')
     parser.add_argument('--save-dir', type=str, default='./checkpoints',
                         help='Directory to save/load model checkpoints')
+    parser.add_argument('--log-dir', type=str, default='./logs',
+                        help='Directory for per-game CSV logs')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--no-per', action='store_true',
+                        help='Disable Prioritized Experience Replay (use uniform random sampling instead)')
+    parser.add_argument('--anticipatory-param', type=float, default=None,
+                        help='NFSP anticipatory parameter (0.0=pure SL, 1.0=pure Q-learning). '
+                             'Default: 0.15.')
     args = parser.parse_args()
 
     # Register and create environment
@@ -313,11 +369,24 @@ def main():
     print(f'  Actions: {env.num_actions}')
     print(f'  State shape: {env.state_shape}')
 
-    # Phase 1: Train or Load NFSP agents
+    # Create per-game CSV logger
+    from game_logger import GameLogger
+    logger = GameLogger(log_dir=args.log_dir)
+
+    use_per = not args.no_per
+
+    # Determine anticipatory param: default to 1.0 when training vs rule-based
+    # (pure Q-learning is more effective against a stationary opponent)
+    if args.anticipatory_param is not None:
+        anticipatory_param = args.anticipatory_param
+    else:
+        anticipatory_param = 0.15
+    print(f'  Anticipatory param: {anticipatory_param} ({"pure Q-learning" if anticipatory_param == 1.0 else "pure avg-policy" if anticipatory_param == 0.0 else "mixed"})')
+
     if args.load_checkpoint is not None:
         nfsp_agents = load_nfsp_agents(
-            env, 
-            args.save_dir, 
+            env,
+            args.save_dir,
             args.load_checkpoint,
             new_rl_lr=args.rl_learning_rate,
             new_sl_lr=args.sl_learning_rate
@@ -325,25 +394,43 @@ def main():
         if args.resume_training:
             rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.001
             sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005
-            nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, agents=nfsp_agents, start_episode=args.load_checkpoint, rl_lr=rl_lr, sl_lr=sl_lr)
+            
+            eval_freq = args.evaluate_every if args.evaluate_every else max(1, args.nfsp_episodes // 10)
+            ckpt_freq = args.checkpoint_every if args.checkpoint_every else eval_freq * 4
+
+            start_ep = 0
+            try:
+                start_ep = int(args.load_checkpoint)
+            except ValueError:
+                # If loading 'final' or non-integer, we default to 0 or could try to infer
+                pass
+
+                nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, eval_freq, ckpt_freq, agents=nfsp_agents, start_episode=start_ep, rl_lr=rl_lr, sl_lr=sl_lr, use_per=use_per)
     else:
         rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.001
         sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005
-        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, args.evaluate_every, args.checkpoint_every, rl_lr=rl_lr, sl_lr=sl_lr)
+        
+        eval_freq = args.evaluate_every if args.evaluate_every else max(1, args.nfsp_episodes // 10)
+        ckpt_freq = args.checkpoint_every if args.checkpoint_every else eval_freq * 4
+
+        nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, eval_freq, ckpt_freq, rl_lr=rl_lr, sl_lr=sl_lr, use_per=use_per)
+
 
     # Phase 2: Hybrid MC-NFSP evaluation
     hybrid_avg, hybrid_pcts = run_hybrid_evaluation(
         env, nfsp_agents, args.hybrid_games,
-        args.mcts_depth, args.mcts_simulations
+        args.mcts_depth, args.mcts_simulations, logger=logger
     )
 
     # Phase 3: Pure NFSP comparison
-    nfsp_avg, nfsp_pcts = run_pure_nfsp_evaluation(env, nfsp_agents, args.eval_games)
+    nfsp_avg, nfsp_pcts = run_pure_nfsp_evaluation(env, nfsp_agents, args.eval_games, logger=logger)
 
     # Phase 4: Hybrid vs Pure
     hvp_results = None
     if args.hybrid_vs_pure_games > 0:
-        hvp_results = run_hybrid_vs_pure_evaluation(env, nfsp_agents, args.hybrid_vs_pure_games, args.mcts_depth, args.mcts_simulations)
+        hvp_results = run_hybrid_vs_pure_evaluation(env, nfsp_agents, args.hybrid_vs_pure_games, args.mcts_depth, args.mcts_simulations, logger=logger)
+
+    print(f'\n  Game logs saved to: {args.log_dir}/')
 
     # Summary
     print('═' * 80)
@@ -362,12 +449,13 @@ def main():
         for pid in range(env.num_players):
             s = hvp_results['per_seat'][pid]
             h_str = f'Payoff {s["h_payoff"]:.2f} (Won {s["h_win"]:.1f}%)'
-            p_str = f'Payoff {s["p_payoff"]:.2f} (Won {s["p_win"]:.1f}%)'
-            print(f'  Seat {pid:<5} {h_str:>30} {p_str:>30}')
+            opp_str = f'Payoff {s["opp_payoff"]:.2f} (Won {s["opp_win"]:.1f}%)'
+            print(f'  Seat {pid:<5} {h_str:>30} {opp_str:>30}')
         print(f'  {"─"*10} {"─"*30} {"─"*30}')
         h = hvp_results['hybrid']
-        p = hvp_results['pure']
-        print(f'  {"TOTAL":<10} {f"Payoff {h["payoff"]:.2f} (Won {h["win_pct"]:.1f}%)":>30} {f"Payoff {p["payoff"]:.2f} (Won {p["win_pct"]:.1f}%)":>30}')
+        h_total_str = 'Payoff {:.2f} (Won {:.1f}%)'.format(h['payoff'], h['win_pct'])
+        opp_total_str = 'Payoff {:.2f} (Won {:.1f}%)'.format(h['opp_payoff'], h['opp_win_pct'])
+        print(f'  {"TOTAL":<10} {h_total_str:>30} {opp_total_str:>30}')
     print('═' * 80)
 
     if hvp_results is not None:

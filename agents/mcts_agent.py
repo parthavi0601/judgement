@@ -88,9 +88,23 @@ class JudgementMCTSAgent:
         game_clone = copy.deepcopy(self.env.game)
         checkpoint = game_clone.save_checkpoint()
 
-        for _ in range(self.num_simulations):
-            self._one_simulation(root, game_clone, legal_actions)
-            game_clone.restore_checkpoint(checkpoint)
+        import time
+        start_time = time.time()
+        sim_count = 0
+        
+        # Run until time budget OR simulation count is reached
+        if hasattr(self, 'time_budget') and self.time_budget is not None:
+            while time.time() - start_time < self.time_budget:
+                self._one_simulation(root, game_clone, legal_actions)
+                game_clone.restore_checkpoint(checkpoint)
+                sim_count += 1
+        else:
+            for _ in range(self.num_simulations):
+                self._one_simulation(root, game_clone, legal_actions)
+                game_clone.restore_checkpoint(checkpoint)
+                sim_count += 1
+        
+        print(f"[DEBUG PURE] Budget: {getattr(self, 'time_budget', 'N/A')}s, Sims: {sim_count}")
 
         if not root.children:
             return np.random.choice(legal_actions)

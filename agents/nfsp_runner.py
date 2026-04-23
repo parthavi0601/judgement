@@ -54,10 +54,11 @@ def reorganize_dense(trajectories, payoffs):
 
 
 def patch_agent_losses(agent):
-    """Monkey patch to track latest losses for logging."""
+    """Monkey patch to track latest losses and PER beta for logging."""
     agent.latest_sl_loss = 0.0
     agent.latest_rl_loss = 0.0
-    
+    agent.latest_per_beta = 0.0
+
     original_train_sl = agent.train_sl
     def tracked_train_sl(*args, orig_fn=original_train_sl, agent_ref=agent, **kwargs):
         sl_loss = orig_fn(*args, **kwargs)
@@ -65,22 +66,25 @@ def patch_agent_losses(agent):
             agent_ref.latest_sl_loss = sl_loss
         return sl_loss
     agent.train_sl = tracked_train_sl
-    
+
     original_update = agent._rl_agent.q_estimator.update
     def tracked_update(*args, orig_fn=original_update, agent_ref=agent, **kwargs):
         rl_loss = orig_fn(*args, **kwargs)
         agent_ref.latest_rl_loss = rl_loss
+        # Capture PER beta from memory if using PER
+        if hasattr(agent_ref._rl_agent.memory, 'current_beta'):
+            agent_ref.latest_per_beta = agent_ref._rl_agent.memory.current_beta
         return rl_loss
     agent._rl_agent.q_estimator.update = tracked_update
     return agent
 
 
-def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.001, sl_learning_rate=0.005):
+def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.001, sl_learning_rate=0.005, use_per=True, anticipatory_param=0.15, q_epsilon_decay_steps=1400000):
     """Create NFSP agents for all players."""
     if hidden_layers is None:
         hidden_layers = [1024, 512, 256]
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cpu')
 
     agents = []
     for _ in range(env.num_players):
@@ -89,7 +93,7 @@ def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.
             state_shape=env.state_shape[0],
             hidden_layers_sizes=hidden_layers,
             reservoir_buffer_capacity=350000, # Scaled down to prevent OOM
-            anticipatory_param=0.15,
+            anticipatory_param=anticipatory_param,
             batch_size=512,
             train_every=32,
             rl_learning_rate=rl_learning_rate,
@@ -100,22 +104,24 @@ def create_nfsp_agents(env, hidden_layers=None, device=None, rl_learning_rate=0.
             q_update_target_estimator_every=500,
             q_discount_factor=0.995,  # Critical for terminal bid reward credit assignment in Judgement
             q_epsilon_start=1.0,
-            q_epsilon_decay_steps=2100000, # Decays over exactly 150,000 episodes (150,000 * 14 steps)
+            q_epsilon_end=0.05,
+            q_epsilon_decay_steps=q_epsilon_decay_steps,
             q_train_every=32,
             q_mlp_layers=hidden_layers,
             evaluate_with='average_policy',
             device=device,
+            use_per=use_per,
         )
-        
+
         patch_agent_losses(agent)
         agents.append(agent)
     return agents
 
 
-def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=None, save_dir=None, verbose=True, agents=None, start_episode=0, rl_learning_rate=0.01, sl_learning_rate=0.005):
+def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=None, save_dir=None, verbose=True, agents=None, start_episode=0, rl_learning_rate=0.01, sl_learning_rate=0.005, use_per=True):
     """
     Train NFSP agents on the Judgement environment.
-    
+
     Args:
         env: JudgementEnv instance
         num_episodes: Total training episodes
@@ -125,16 +131,18 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
         verbose: Print progress
         agents: Optional existing agents to resume training
         start_episode: Episode number to start/resume from
-    
+        use_per: If True, use Prioritized Experience Replay for the DQN buffer.
+
     Returns:
         agents: Trained NFSP agents
     """
     if checkpoint_every is None:
         checkpoint_every = evaluate_every * 4
-        
+
     if agents is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        agents = create_nfsp_agents(env, device=device, rl_learning_rate=rl_learning_rate, sl_learning_rate=sl_learning_rate)
+        device = torch.device('cpu')
+        decay_steps = int(num_episodes * 14 * 0.8) # Decay epsilon over 80% of the training run
+        agents = create_nfsp_agents(env, device=device, rl_learning_rate=rl_learning_rate, sl_learning_rate=sl_learning_rate, use_per=use_per, q_epsilon_decay_steps=decay_steps)
         
     env.set_agents(agents)
 
@@ -152,6 +160,7 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
                     header.extend([
                         f'player_{pid}_avg_payoff', f'player_{pid}_rl_loss', f'player_{pid}_sl_loss',
                         f'player_{pid}_won_pct', f'player_{pid}_under_pct', f'player_{pid}_over_pct',
+                        f'player_{pid}_per_beta',
                     ])
                 writer.writerow(header)
 
@@ -218,9 +227,11 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
             csv_row = [episode]
             for pid in range(env.num_players):
                 pcts = outcome_pcts[pid]
-                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f} | RL loss = {agents[pid].latest_rl_loss:.4f} | SL loss = {agents[pid].latest_sl_loss:.4f} | Won {pcts["won"]:.1f}% Under {pcts["under"]:.1f}% Over {pcts["over"]:.1f}%')
+                per_beta = agents[pid].latest_per_beta
+                print(f'  Player {pid}: avg payoff = {avg_payoffs[pid]:.4f} | RL loss = {agents[pid].latest_rl_loss:.4f} | SL loss = {agents[pid].latest_sl_loss:.4f} | PER beta = {per_beta:.3f} | Won {pcts["won"]:.1f}% Under {pcts["under"]:.1f}% Over {pcts["over"]:.1f}%')
                 csv_row.extend([avg_payoffs[pid], agents[pid].latest_rl_loss, agents[pid].latest_sl_loss,
-                                round(pcts['won'], 2), round(pcts['under'], 2), round(pcts['over'], 2)])
+                                round(pcts['won'], 2), round(pcts['under'], 2), round(pcts['over'], 2),
+                                round(per_beta, 4)])
             
             if csv_path is not None:
                 with open(csv_path, 'a', newline='') as f:
@@ -237,7 +248,7 @@ def train_nfsp(env, num_episodes=10000, evaluate_every=500, checkpoint_every=Non
     return agents
 
 
-def evaluate_agents(env, agents, num_episodes=100):
+def evaluate_agents(env, agents, num_episodes=100, logger=None):
     """Evaluate trained agents via random games."""
     # Force greedy evaluation! NFSP defaults to average_policy which 
     # throws cards probabilistically. We want strict Deterministic argmax.
@@ -251,6 +262,8 @@ def evaluate_agents(env, agents, num_episodes=100):
 
     for _ in range(num_episodes):
         _, payoffs = env.run(is_training=False)
+        if logger:
+            logger.log_eval_game('pure_all', env.game.players, payoffs, env.num_players)
         payoffs_sum += payoffs
         
         for pid in range(env.num_players):
@@ -276,3 +289,5 @@ def evaluate_agents(env, agents, num_episodes=100):
         })
     
     return avg_payoffs, pcts
+
+

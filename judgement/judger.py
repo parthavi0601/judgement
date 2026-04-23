@@ -153,39 +153,6 @@ class JudgementJudger:
         if won_trick:
             if remaining_needed >= 0:
                 # Won and still need more or exactly met — on track
-                return 0.5
-            else:
-                # Won but exceeded bid
-                return -1.0
-        else:
-            if remaining_needed == 0:
-                # Lost and exactly at bid — good, avoiding excess
-                return 0.5
-            elif remaining_needed > 0:
-                # Lost but still need tricks — bad
-                return -0.5
-            else:
-                # Lost and already exceeded — damage is done
-                return -0.3
-"""
-   @staticmethod
-    def compute_dense_trick_reward(player: JudgementPlayer, won_trick: bool) -> float:
-        "#""
-        Dense per-trick reward based on alignment with bid.
-        Call AFTER updating tricks_won.
-
-        Only exact bid match scores in Judgement, so exceeding
-        is just as bad as falling short.
-        "#""
-        if player.bid is None:
-            return 0.0
-
-        remaining_needed = player.bid - player.tricks_won
-        # After this trick, remaining_needed reflects the gap
-
-        if won_trick:
-            if remaining_needed >= 0:
-                # Won and still need more or exactly met — on track
                 return 1.0
             else:
                 # Won but exceeded bid
@@ -199,6 +166,4 @@ class JudgementJudger:
                 return -0.3
             else:
                 # Lost and already exceeded — damage is done
-                return 0
-
-"""
+                return 0.0

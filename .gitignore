@@ -12,3 +12,8 @@ checkpoints/
 1venv/
 temp/
 1.py
+logs/
+logs_test/
+checkpoints_q1.0/
+checkpoints16/
+checkpoints17/

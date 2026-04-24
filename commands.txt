@@ -1,0 +1,9 @@
+
+TRAIN:
+ uv run main.py --save-dir checkpointsprac --evaluate-every 500 --checkpoint-every 1000 --mcts-simulations 50 --mcts-depth 2 --hybrid-games 10 --nfsp-episodes 5000 --eval-games 20 --hybrid-vs-pure-games 25 --log-dir logsprac
+
+TEST:
+ uv run main.py --save-dir checkpoints17 --load-checkpoint 600000 --eval-games 20 --hybrid-games 10 --hybrid-vs-pure-games 25 --log-dir logsprac
+
+RESUME:
+ uv run main.py --save-dir checkpoints17 --load-checkpoint 600000 --resume-training --nfsp-episodes 200000 --evaluate-every 500 --checkpoint-every 1000 --log-dir logsprac

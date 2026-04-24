@@ -105,8 +105,6 @@ class HybridMCNFSPAgent:
                 self._simulate(root, game_clone, legal_actions)
                 game_clone.restore_checkpoint(checkpoint)
                 sim_count += 1
-        
-        print(f"[DEBUG HYBRID] Budget: {self.time_budget}s, Sims: {sim_count}")
 
         if not root.children:
             return int(np.random.choice(legal_actions))

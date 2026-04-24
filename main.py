@@ -9,7 +9,7 @@ import sys
 import copy
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+import argparse
 from rlcard.envs.registration import register as rlcard_register, make as rlcard_make
 
 
@@ -375,8 +375,6 @@ def main():
 
     use_per = not args.no_per
 
-    # Determine anticipatory param: default to 1.0 when training vs rule-based
-    # (pure Q-learning is more effective against a stationary opponent)
     if args.anticipatory_param is not None:
         anticipatory_param = args.anticipatory_param
     else:
@@ -405,7 +403,7 @@ def main():
                 # If loading 'final' or non-integer, we default to 0 or could try to infer
                 pass
 
-                nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, eval_freq, ckpt_freq, agents=nfsp_agents, start_episode=start_ep, rl_lr=rl_lr, sl_lr=sl_lr, use_per=use_per)
+            nfsp_agents = run_nfsp_training(env, args.nfsp_episodes, args.save_dir, eval_freq, ckpt_freq, agents=nfsp_agents, start_episode=start_ep, rl_lr=rl_lr, sl_lr=sl_lr, use_per=use_per)
     else:
         rl_lr = args.rl_learning_rate if args.rl_learning_rate is not None else 0.001
         sl_lr = args.sl_learning_rate if args.sl_learning_rate is not None else 0.005

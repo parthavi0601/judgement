@@ -13,7 +13,6 @@ import copy
 import math
 import numpy as np
 import torch
-import time
 from typing import List, Optional, Dict
 
 
@@ -47,9 +46,8 @@ class _MCTSNode:
 
 class HybridMCNFSPAgent:
     def __init__(self, env, agent_player_id: int, all_nfsp_agents=None,
-                 num_simulations: int = 1000000, max_depth: int = 100,
-                 exploration_constant: float = 1.414,
-                 time_budget: Optional[float] = None):
+                 num_simulations: int = 200, max_depth: int = 100,
+                 exploration_constant: float = 1.414):
         self.env = env
         self.agent_player_id = agent_player_id
         self.all_nfsp_agents = all_nfsp_agents
@@ -57,7 +55,6 @@ class HybridMCNFSPAgent:
         self.num_simulations = num_simulations
         self.max_depth = max_depth
         self.exploration_constant = exploration_constant
-        self.time_budget = time_budget
         self.use_raw = True
 
     def step(self, state) -> int:
@@ -85,26 +82,24 @@ class HybridMCNFSPAgent:
 
         root = _MCTSNode(player_id=self.agent_player_id)
 
+        # Dynamic budget scaling: invest more sims when branching is narrow
+        # to cut through determinization noise with fewer legal options
+        n_legal = len(legal_actions)
+        if n_legal <= 3:
+            scaled_sims = self.num_simulations * 4
+        elif n_legal <= 5:
+            scaled_sims = self.num_simulations * 2
+        else:
+            scaled_sims = self.num_simulations
+
         # Single deep copy + checkpoint: N lightweight restores instead of N deep copies
         game_clone = copy.deepcopy(self.env.game)
         checkpoint = game_clone.save_checkpoint()
 
-        start_time = time.time()
-        sim_count = 0
-
-        # Run until time budget OR simulation count is reached
-        if self.time_budget is not None:
-            while time.time() - start_time < self.time_budget:
-                self._determinize(game_clone)
-                self._simulate(root, game_clone, legal_actions)
-                game_clone.restore_checkpoint(checkpoint)
-                sim_count += 1
-        else:
-            while sim_count < self.num_simulations:
-                self._determinize(game_clone)
-                self._simulate(root, game_clone, legal_actions)
-                game_clone.restore_checkpoint(checkpoint)
-                sim_count += 1
+        for _ in range(scaled_sims):
+            self._determinize(game_clone)
+            self._simulate(root, game_clone, legal_actions)
+            game_clone.restore_checkpoint(checkpoint)
 
         if not root.children:
             return int(np.random.choice(legal_actions))
@@ -433,99 +428,98 @@ class HybridMCNFSPAgent:
             return float(np.clip(-0.3 * abs(needed), -1.0, 0.0))
 
 
-class ISMCTSAgent(HybridMCNFSPAgent):
-    """
-    Classic ISMCTS Agent using random rollouts until round-end.
-    - No NFSP guidance (sampled actions are random)
-    - No depth limit (searches to terminal state)
-    - Random opponent modeling
-    - Terminal reward scoring only
-    """
-    def __init__(self, env, agent_player_id: int, time_budget: float = 2.0, exploration_constant: float = 1.414):
-        super().__init__(env, agent_player_id, 
-                         all_nfsp_agents=None, 
-                         num_simulations=1000000, # Handled by time_budget
-                         max_depth=100,           # Full rollout
-                         exploration_constant=exploration_constant,
-                         time_budget=time_budget)
+# class ISMCTSAgent(HybridMCNFSPAgent):
+#     """
+#     Classic ISMCTS Agent using random rollouts until round-end.
+#     - No NFSP guidance (sampled actions are random)
+#     - No depth limit (searches to terminal state)
+#     - Random opponent modeling
+#     - Terminal reward scoring only
+#     """
+#     def __init__(self, env, agent_player_id: int, num_simulations: int = 200, exploration_constant: float = 1.414):
+#         super().__init__(env, agent_player_id, 
+#                          all_nfsp_agents=None, 
+#                          num_simulations=num_simulations,
+#                          max_depth=100,           # Full rollout
+#                          exploration_constant=exploration_constant)
 
-    def eval_step(self, state):
-        action = self._run_mcts(state)
-        return action, {'agent': 'pure_ismcts'}
+#     def eval_step(self, state):
+#         action = self._run_mcts(state)
+#         return action, {'agent': 'pure_ismcts'}
 
-    def _sample_opponent_action(self, game, acting_player_id, legal_actions) -> int:
-        """Strictly random opponent modeling."""
-        return int(np.random.choice(legal_actions))
+#     def _sample_opponent_action(self, game, acting_player_id, legal_actions) -> int:
+#         """Strictly random opponent modeling."""
+#         return int(np.random.choice(legal_actions))
 
-    def _simulate(self, root: _MCTSNode, game, legal_actions: List[int]):
-        """Classic ISMCTS rollout until game over."""
-        node = root
-        path = [node]
+#     def _simulate(self, root: _MCTSNode, game, legal_actions: List[int]):
+#         """Classic ISMCTS rollout until game over."""
+#         node = root
+#         path = [node]
 
-        # ── Selection ──
-        current_legal = legal_actions
-        while (node.children
-               and node.is_fully_expanded(current_legal)
-               and not node.is_terminal):
+#         # ── Selection ──
+#         current_legal = legal_actions
+#         while (node.children
+#                and node.is_fully_expanded(current_legal)
+#                and not node.is_terminal):
 
-            acting_player = game.get_player_id()
-            if acting_player == self.agent_player_id:
-                node = node.best_child(self.exploration_constant)
-                action = node.action
-            else:
-                # Filter children by current legality for this determinization
-                valid_children_actions = [a for a in node.children.keys() if a in current_legal]
-                if not valid_children_actions:
-                    break
+#             acting_player = game.get_player_id()
+#             if acting_player == self.agent_player_id:
+#                 node = node.best_child(self.exploration_constant)
+#                 action = node.action
+#             else:
+#                 # Filter children by current legality for this determinization
+#                 valid_children_actions = [a for a in node.children.keys() if a in current_legal]
+#                 if not valid_children_actions:
+#                     break
                 
-                # Pick a legal action from the explored children
-                action = int(np.random.choice(valid_children_actions))
-                node = node.children[action]
+#                 # Pick a legal action from the explored children
+#                 action = int(np.random.choice(valid_children_actions))
+#                 node = node.children[action]
 
-            game.step(action)
-            path.append(node)
+#             game.step(action)
+#             path.append(node)
 
-            if game.is_over():
-                node.is_terminal = True
-                break
-            current_legal = game._get_legal_actions()
+#             if game.is_over():
+#                 node.is_terminal = True
+#                 break
+#             current_legal = game._get_legal_actions()
 
-        # ── Expansion ──
-        if not node.is_terminal and not game.is_over() and (self.max_depth is None or len(path) - 1 < self.max_depth):
-            current_legal = game._get_legal_actions()
-            acting_player = game.get_player_id()
+#         # ── Expansion ──
+#         if not node.is_terminal and not game.is_over() and (self.max_depth is None or len(path) - 1 < self.max_depth):
+#             current_legal = game._get_legal_actions()
+#             acting_player = game.get_player_id()
 
-            if acting_player == self.agent_player_id:
-                unexplored = [a for a in current_legal if a not in node.children]
-                if unexplored:
-                    action = int(np.random.choice(unexplored))
-                else:
-                    action = None
-            else:
-                action = self._sample_opponent_action(game, acting_player, current_legal)
+#             if acting_player == self.agent_player_id:
+#                 unexplored = [a for a in current_legal if a not in node.children]
+#                 if unexplored:
+#                     action = int(np.random.choice(unexplored))
+#                 else:
+#                     action = None
+#             else:
+#                 action = self._sample_opponent_action(game, acting_player, current_legal)
 
-            if action is not None and action not in node.children:
-                child = _MCTSNode(parent=node, action=action, player_id=acting_player)
-                node.children[action] = child
-                node = child
-                path.append(node)
+#             if action is not None and action not in node.children:
+#                 child = _MCTSNode(parent=node, action=action, player_id=acting_player)
+#                 node.children[action] = child
+#                 node = child
+#                 path.append(node)
 
-                if not game.is_over():
-                    game.step(action)
+#                 if not game.is_over():
+#                     game.step(action)
 
-        # ── Full Rollout (Random Play) ──
-        while not game.is_over():
-            current_legal = game._get_legal_actions()
-            if not current_legal:
-                break
-            action = int(np.random.choice(current_legal))
-            game.step(action)
+#         # ── Full Rollout (Random Play) ──
+#         while not game.is_over():
+#             current_legal = game._get_legal_actions()
+#             if not current_legal:
+#                 break
+#             action = int(np.random.choice(current_legal))
+#             game.step(action)
 
-        # ── Terminal Reward ──
-        reward = self._score_terminal(game)
-        reward = float(np.clip(reward, -1.0, 1.0))
+#         # ── Terminal Reward ──
+#         reward = self._score_terminal(game)
+#         reward = float(np.clip(reward, -1.0, 1.0))
 
-        # ── Backpropagation ──
-        for n in path:
-            n.visits += 1
-            n.total_reward += reward
+#         # ── Backpropagation ──
+#         for n in path:
+#             n.visits += 1
+#             n.total_reward += reward
